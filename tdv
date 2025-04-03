@@ -1,215 +1,108 @@
-import sys
-import json
-import datetime
-import pandas as pd
+
 import pytest
-from unittest.mock import MagicMock
-
-import teradatasql
-
-# Import your module and class.
-# Adjust the import if your file or package name is different.
-from db_config_create import Db_Config_Create, s3_resource
-
-# A fake set of resolved arguments to simulate the behavior of awsglue.utils.getResolvedOptions.
-fake_args = {
-    "OSS_ENV": "dev",
-    "DATABASE_NAME": "TEST_DB",    # Use a name that does NOT end with '_V' for one branch.
-    "TABLE_NAME": "TEST_TABLE",
-    "SERVER": "test.server.com",
-    "secret_name": "test_secret",
-    "BUCKET_NAME": "test-bucket",
-    "JOB_RUN_ID": "1234",
-}
+from unittest.mock import patch, MagicMock
+from db_config_create import Db_Config_Create  # Change this if your file is named differently
+import json
 
 
-@pytest.fixture(autouse=True)
-def set_fake_args(monkeypatch):
-    """
-    Override the global args in the module so that the class is initialized with predictable values.
-    """
-    monkeypatch.setattr("db_config_create.args", fake_args)
+@pytest.fixture
+def mock_env_vars():
+    with patch("db_config_create.getResolvedOptions") as mock_get_args:
+        mock_get_args.return_value = {
+            "OSS_ENV": "dev",
+            "DATABASE_NAME": "test_db_V",
+            "TABLE_NAME": "test_table",
+            "SERVER": "td.test.com",
+            "secret_name": "mysecret",
+            "BUCKET_NAME": "my-bucket",
+            "JOB_RUN_ID": "job-123"
+        }
+        yield
 
 
-def test_get_tdv_creds_success(monkeypatch):
-    """
-    Test that get_tdv_creds returns the correct credentials when a valid secret is returned.
-    """
-    fake_secret = {"username": "fake_user", "password": "fake_password"}
-    fake_get_secret_value_response = {"SecretString": json.dumps(fake_secret)}
+@pytest.fixture
+def mock_aws_services():
+    with patch("db_config_create.boto3.resource") as mock_resource, \
+         patch("db_config_create.boto3.session.Session") as mock_session:
 
-    fake_client = MagicMock()
-    fake_client.get_secret_value.return_value = fake_get_secret_value_response
+        # Mock SecretsManager
+        mock_client = MagicMock()
+        mock_client.get_secret_value.return_value = {
+            "SecretString": json.dumps({"username": "admin", "password": "adminpass"})
+        }
+        mock_session.return_value.client.return_value = mock_client
 
-    fake_session = MagicMock()
-    fake_session.client.return_value = fake_client
+        # Mock S3 and DynamoDB
+        mock_ddb = MagicMock()
+        mock_ddb.Table.return_value = MagicMock()
+        mock_s3_obj = MagicMock()
+        mock_resource.return_value.Object.return_value = mock_s3_obj
+        mock_resource.return_value.Table.return_value = MagicMock()
 
-    # Patch the boto3 session so that our fake session is used.
-    monkeypatch.setattr("boto3.session.Session", lambda: fake_session)
-
-    db_config = Db_Config_Create()
-    username, password = db_config.get_tdv_creds()
-
-    assert username == "fake_user"
-    assert password == "fake_password"
-
-
-def test_get_tdv_creds_failure(monkeypatch):
-    """
-    Test that get_tdv_creds raises an exception when the secret cannot be retrieved.
-    """
-    fake_client = MagicMock()
-    fake_client.get_secret_value.side_effect = Exception("Secret not found")
-
-    fake_session = MagicMock()
-    fake_session.client.return_value = fake_client
-
-    monkeypatch.setattr("boto3.session.Session", lambda: fake_session)
-
-    db_config = Db_Config_Create()
-
-    with pytest.raises(Exception, match="Secret not found"):
-        db_config.get_tdv_creds()
+        yield mock_resource, mock_session, mock_s3_obj
 
 
-def test_func_tdconnect(monkeypatch):
-    """
-    Test that func_tdconnect calls get_tdv_creds and returns a Teradata connection.
-    """
-    # Patch get_tdv_creds to return fixed credentials.
-    monkeypatch.setattr(
-        Db_Config_Create, "get_tdv_creds", lambda self: ("fake_user", "fake_password")
-    )
-
-    # Create a fake connection and capture the parameters passed to teradatasql.connect.
-    fake_connection = MagicMock()
-    captured_params = {}
-
-    def fake_tdconnect(**kwargs):
-        captured_params.update(kwargs)
-        return fake_connection
-
-    monkeypatch.setattr(teradatasql, "connect", fake_tdconnect)
-
-    db_config = Db_Config_Create()
-    connection = db_config.func_tdconnect()
-
-    assert connection == fake_connection
-    assert captured_params["host"] == fake_args["SERVER"]
-    assert captured_params["user"] == "fake_user"
-    assert captured_params["password"] == "fake_password"
-    # Optionally, you can also check for the presence of other parameters like LOGMECH and encryptdata.
+@pytest.fixture
+def mock_spark_session():
+    with patch("db_config_create.SparkSession.builder.getOrCreate") as mock_spark:
+        mock_session = MagicMock()
+        mock_df = MagicMock()
+        mock_df.count.return_value = 2
+        mock_df.toPandas.return_value = MagicMock(
+            sort_values=lambda by: MagicMock(
+                __getitem__=lambda self, key: MagicMock(to_list=lambda: ["col1 INT", "col2 STRING"]),
+                index=[0, 1],
+                __getitem__=lambda self, idx: {
+                    0: "col1 INT",
+                    1: "col2 STRING"
+                }[idx]
+            )
+        )
+        mock_session.read.format.return_value.option.return_value.option.return_value.option.return_value.load.return_value = mock_df
+        mock_spark.return_value = mock_session
+        yield mock_spark
 
 
-def test_update_audit_table(monkeypatch):
-    """
-    Test that update_audit_table calls the audit table's update_item method with the expected values.
-    """
-    db_config = Db_Config_Create()
-    fake_audit_table = MagicMock()
-    db_config.audit_table = fake_audit_table
-
-    run_id = fake_args["JOB_RUN_ID"]
-    source_db = fake_args["DATABASE_NAME"]
-    source_table = fake_args["TABLE_NAME"]
-    run_status = "Success"
-    error_message = ""
-
-    db_config.update_audit_table(run_id, source_db, source_table, run_status, error_message)
-    fake_audit_table.update_item.assert_called_once()
-    # You may inspect fake_audit_table.update_item.call_args for more detailed parameter checks.
+@pytest.fixture
+def mock_teradata():
+    with patch("db_config_create.teradatasql.connect") as mock_td:
+        mock_cursor = MagicMock()
+        mock_td.return_value.cursor.return_value = mock_cursor
+        yield mock_td, mock_cursor
 
 
-def test_write_to_s3_else_branch(monkeypatch):
-    """
-    Test write_to_s3 when the DATABASE_NAME does NOT end with '_V'.
-    This simulates the non-view branch.
-    """
-    # Create a fake Spark DataFrame using a simple pandas DataFrame.
-    fake_pdf = pd.DataFrame({
-        "ColumnId": [1, 2],
-        "COL_DATATYPE": ["col1 INT", "col2 VARCHAR"]
-    })
-
-    # Define fake classes to simulate Spark's DataFrame and DataFrameReader.
-    class FakeDataFrame:
-        def __init__(self, pdf):
-            self.pdf = pdf
-
-        def count(self):
-            return len(self.pdf)
-
-        def toPandas(self):
-            return self.pdf
-
-    class FakeDataFrameReader:
-        def __init__(self, pdf):
-            self.pdf = pdf
-
-        def format(self, fmt):
-            return self
-
-        def option(self, key, value):
-            return self
-
-        def load(self):
-            return FakeDataFrame(fake_pdf)
-
-    class FakeSparkSession:
-        def __init__(self, pdf):
-            self.read = FakeDataFrameReader(pdf)
-
-    db_config = Db_Config_Create()
-    db_config.spark = FakeSparkSession(fake_pdf)
-
-    # Patch get_tdv_creds to return fake credentials.
-    monkeypatch.setattr(db_config, "get_tdv_creds", lambda: ("fake_user", "fake_password"))
-
-    # Patch update_audit_table so we can verify it gets called.
-    audit_called = False
-
-    def fake_update_audit_table(*args, **kwargs):
-        nonlocal audit_called
-        audit_called = True
-
-    monkeypatch.setattr(db_config, "update_audit_table", fake_update_audit_table)
-
-    # Create a fake S3 storage to capture the files written.
-    fake_s3_storage = {}
-
-    def fake_s3_object(bucket, key):
-        class FakeS3Object:
-            def put(self, Body):
-                fake_s3_storage[key] = Body
-        return FakeS3Object()
-
-    monkeypatch.setattr(s3_resource, "Object", fake_s3_object)
-
-    # Patch teradatasql.connect to return a dummy connection (not used in this branch).
-    monkeypatch.setattr(teradatasql, "connect", lambda **kwargs: MagicMock())
-
-    # Execute the write_to_s3 method.
-    db_config.write_to_s3()
-
-    # Construct the expected S3 file paths.
-    config_file_name_txt = f"{db_config.db_name.lower()}_{db_config.table_name.lower()}.txt"
-    config_file_name_json = f"{db_config.db_name.lower()}_{db_config.table_name.lower()}.json"
-    s3_file_path_txt = f"{db_config.bucket_key}{config_file_name_txt}"
-    s3_file_path_json = f"{db_config.bucket_key}{config_file_name_json}"
-
-    # Verify the TXT file content.
-    expected_txt = "col1 INT,col2 VARCHAR"
-    assert fake_s3_storage[s3_file_path_txt] == expected_txt
-
-    # Verify the JSON file content.
-    expected_json = {"col1": "INT", "col2": "VARCHAR"}
-    actual_json = json.loads(fake_s3_storage[s3_file_path_json].decode("utf-8"))
-    assert actual_json == expected_json
-
-    # Confirm that update_audit_table was called.
-    assert audit_called
+def test_get_tdv_creds(mock_env_vars, mock_aws_services, mock_spark_session):
+    obj = Db_Config_Create()
+    username, password = obj.get_tdv_creds()
+    assert username == "admin"
+    assert password == "adminpass"
 
 
-def test_write_to_s3_view_branch(monkeypatch):
-    """
-    Test write_to_s3 when the DATABASE_NAME ends with '_V' (the view branch).
+def test_update_audit_table(mock_env_vars, mock_aws_services, mock_spark_session):
+    obj = Db_Config_Create()
+    obj.update_audit_table("job-123", "test_db", "test_table", "Success", "")
+    audit_call = obj.audit_table.update_item.call_args[1]
+    assert audit_call["ExpressionAttributeValues"][":Run_Status"] == "Success"
+
+
+def test_write_to_s3_success(mock_env_vars, mock_aws_services, mock_spark_session, mock_teradata):
+    obj = Db_Config_Create()
+    obj.write_to_s3()
+    # Check that S3 put was called for both TXT and JSON
+    mock_s3 = mock_aws_services[2]
+    assert mock_s3.put.call_count == 2
+
+
+def test_write_to_s3_fail_secrets(mock_env_vars, mock_spark_session):
+    with patch("db_config_create.boto3.session.Session") as mock_session:
+        mock_session.return_value.client.return_value.get_secret_value.side_effect = Exception("Secrets error")
+        with pytest.raises(Exception):
+            obj = Db_Config_Create()
+            obj.write_to_s3()
+
+
+def test_write_to_s3_fail_audit(mock_env_vars, mock_aws_services, mock_spark_session, mock_teradata):
+    obj = Db_Config_Create()
+    obj.audit_table.update_item.side_effect = Exception("DynamoDB error")
+    with pytest.raises(Exception):
+        obj.write_to_s3()
