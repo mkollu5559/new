@@ -1,23 +1,29 @@
 
+import sys
+from unittest.mock import MagicMock
+
+# Manually mock awsglue.utils.getResolvedOptions with real return values
+mock_get_resolved_options = lambda argv, keys: {
+    "OSS_ENV": "dev",
+    "DATABASE_NAME": "test_db_V",
+    "TABLE_NAME": "test_table",
+    "SERVER": "td.test.com",
+    "secret_name": "mysecret",
+    "BUCKET_NAME": "my-bucket",
+    "JOB_RUN_ID": "job-123"
+}
+
+# Inject into sys.modules before importing the main module
+mock_awsglue_utils = MagicMock()
+mock_awsglue_utils.getResolvedOptions = mock_get_resolved_options
+sys.modules['awsglue'] = MagicMock()
+sys.modules['awsglue.utils'] = mock_awsglue_utils
+
+# Now safe to import
 import pytest
 from unittest.mock import patch, MagicMock
-from db_config_create import Db_Config_Create  # Change this if your file is named differently
 import json
-
-
-@pytest.fixture
-def mock_env_vars():
-    with patch("db_config_create.getResolvedOptions") as mock_get_args:
-        mock_get_args.return_value = {
-            "OSS_ENV": "dev",
-            "DATABASE_NAME": "test_db_V",
-            "TABLE_NAME": "test_table",
-            "SERVER": "td.test.com",
-            "secret_name": "mysecret",
-            "BUCKET_NAME": "my-bucket",
-            "JOB_RUN_ID": "job-123"
-        }
-        yield
+from db_config_create import Db_Config_Create
 
 
 @pytest.fixture
@@ -72,21 +78,21 @@ def mock_teradata():
         yield mock_td, mock_cursor
 
 
-def test_get_tdv_creds(mock_env_vars, mock_aws_services, mock_spark_session):
+def test_get_tdv_creds(mock_aws_services, mock_spark_session):
     obj = Db_Config_Create()
     username, password = obj.get_tdv_creds()
     assert username == "admin"
     assert password == "adminpass"
 
 
-def test_update_audit_table(mock_env_vars, mock_aws_services, mock_spark_session):
+def test_update_audit_table(mock_aws_services, mock_spark_session):
     obj = Db_Config_Create()
     obj.update_audit_table("job-123", "test_db", "test_table", "Success", "")
     audit_call = obj.audit_table.update_item.call_args[1]
     assert audit_call["ExpressionAttributeValues"][":Run_Status"] == "Success"
 
 
-def test_write_to_s3_success(mock_env_vars, mock_aws_services, mock_spark_session, mock_teradata):
+def test_write_to_s3_success(mock_aws_services, mock_spark_session, mock_teradata):
     obj = Db_Config_Create()
     obj.write_to_s3()
     # Check that S3 put was called for both TXT and JSON
@@ -94,7 +100,7 @@ def test_write_to_s3_success(mock_env_vars, mock_aws_services, mock_spark_sessio
     assert mock_s3.put.call_count == 2
 
 
-def test_write_to_s3_fail_secrets(mock_env_vars, mock_spark_session):
+def test_write_to_s3_fail_secrets(mock_spark_session):
     with patch("db_config_create.boto3.session.Session") as mock_session:
         mock_session.return_value.client.return_value.get_secret_value.side_effect = Exception("Secrets error")
         with pytest.raises(Exception):
@@ -102,7 +108,7 @@ def test_write_to_s3_fail_secrets(mock_env_vars, mock_spark_session):
             obj.write_to_s3()
 
 
-def test_write_to_s3_fail_audit(mock_env_vars, mock_aws_services, mock_spark_session, mock_teradata):
+def test_write_to_s3_fail_audit(mock_aws_services, mock_spark_session, mock_teradata):
     obj = Db_Config_Create()
     obj.audit_table.update_item.side_effect = Exception("DynamoDB error")
     with pytest.raises(Exception):
