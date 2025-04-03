@@ -48,16 +48,17 @@ def mock_spark_session():
         mock_session = MagicMock()
         mock_df = MagicMock()
         mock_df.count.return_value = 2
-        mock_df.toPandas.return_value = MagicMock(
-            sort_values=lambda by: MagicMock(
-                __getitem__=lambda self, key: MagicMock(to_list=lambda: ["col1 INT", "col2 STRING"]),
-                index=[0, 1],
-                __getitem__=lambda self, idx: {
-                    0: "col1 INT",
-                    1: "col2 STRING"
-                }[idx]
-            )
-        )
+
+        # Mock the toPandas() DataFrame
+        mock_pandas_df = MagicMock()
+        mock_pandas_df.index = [0, 1]
+        mock_pandas_df.__getitem__.side_effect = lambda key: {
+            "COL_DATATYPE": ["col1 INT", "col2 STRING"]
+        }[key]
+        mock_pandas_df.sort_values.return_value = mock_pandas_df
+        mock_pandas_df["COL_DATATYPE"].to_list = lambda: ["col1 INT", "col2 STRING"]
+
+        mock_df.toPandas.return_value = mock_pandas_df
         mock_session.read.format.return_value.option.return_value.option.return_value.option.return_value.load.return_value = mock_df
         mock_spark.return_value = mock_session
         yield mock_spark
