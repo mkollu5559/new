@@ -1,1 +1,161 @@
 
+
+import pytest
+from unittest.mock import patch, MagicMock
+from glue_job import (
+    get_registration_data,
+    get_audit_data,
+    update_audit_table,
+    rename_file,
+    publish_sns_msg,
+    tdv_csv_file_read,
+    file_conversion
+)
+
+# -----------------------------
+# Fixtures and Mocks
+# -----------------------------
+
+@pytest.fixture
+def mock_tables(mocker):
+    reg_table = MagicMock()
+    reg_table.get_item.return_value = {
+        'Item': {
+            'Column_Filter': 'col1,col2',
+            'Primary_Key': 'col1',
+            'Source_Type': 's3',
+            'Target_Type': 'parquet'
+        }
+    }
+
+    audit_table = MagicMock()
+    audit_table.get_item.return_value = {
+        'Item': {
+            'Error_Message': '',
+            'Run_Status': 'Success'
+        }
+    }
+
+    mocker.patch('glue_job.reg_table', reg_table)
+    mocker.patch('glue_job.audit_table', audit_table)
+    return reg_table, audit_table
+
+
+# -----------------------------
+# Test get_registration_data
+# -----------------------------
+
+def test_get_registration_data_success(mock_tables):
+    columns, pk, source, target = get_registration_data()
+    assert columns == 'col1,col2'
+    assert pk == 'col1'
+    assert source == 's3'
+    assert target == 'parquet'
+
+@patch('glue_job.reg_table.get_item', side_effect=Exception("DynamoDB error"))
+@patch('glue_job.update_audit_table')
+def test_get_registration_data_failure(mock_update_audit, mock_get):
+    with pytest.raises(Exception, match="Exception in registration table"):
+        get_registration_data()
+    mock_update_audit.assert_called()
+
+
+# -----------------------------
+# Test get_audit_data
+# -----------------------------
+
+def test_get_audit_data_success(mock_tables):
+    run_status, err = get_audit_data()
+    assert run_status == 'Success'
+    assert err == ''
+
+@patch('glue_job.audit_table.get_item', side_effect=Exception("Audit fetch fail"))
+@patch('glue_job.update_audit_table')
+def test_get_audit_data_failure(mock_update_audit, mock_get):
+    with pytest.raises(Exception, match="Exception in registration table"):
+        get_audit_data()
+    mock_update_audit.assert_called()
+
+
+# -----------------------------
+# Test update_audit_table
+# -----------------------------
+
+def test_update_audit_table_success(mock_tables):
+    result = update_audit_table(1, 'Success', 'file.txt', 10, '')
+    assert isinstance(result, str) and len(result) > 0
+
+
+# -----------------------------
+# Test publish_sns_msg
+# -----------------------------
+
+@patch('glue_job.SNSclient.publish', return_value={"MessageId": "test-id"})
+def test_publish_sns_msg_success(mock_publish):
+    result = publish_sns_msg({"hello": "world"})
+    assert result == "Success"
+    mock_publish.assert_called_once()
+
+@patch('glue_job.SNSclient.publish', side_effect=Exception("SNS failed"))
+@patch('glue_job.update_audit_table')
+def test_publish_sns_msg_failure(mock_update_audit, mock_publish):
+    with pytest.raises(Exception, match="Exception in sns publish"):
+        publish_sns_msg({"fail": "now"})
+    mock_update_audit.assert_called()
+
+
+# -----------------------------
+# Test rename_file
+# -----------------------------
+
+@patch('glue_job.s3_resource.meta.client')
+@patch('glue_job.FINAL_TGT_FILE_NAME', 'test.csv')
+@patch('glue_job.full_tgt_file_path', 'tmp/')
+@patch('glue_job.full_tgt_file', 's3://bucket/tmp/')
+@patch('glue_job.TGT_BUCKET_NAME', 'my-bucket')
+def test_rename_file_success(mock_client):
+    mock_client.list_objects.return_value = {
+        'Contents': [{'Key': 'tmp/part-00000.csv'}]
+    }
+    mock_client.copy.return_value = {}
+    mock_client.delete_object.return_value = {}
+    final_file = rename_file()
+    assert final_file.endswith("test.csv")
+
+
+# -----------------------------
+# Test tdv_csv_file_read
+# -----------------------------
+
+@patch('glue_job.s3_client.list_objects_v2')
+@patch('glue_job.spark.read')
+def test_tdv_csv_file_read(mock_spark_read, mock_list):
+    mock_list.return_value = {
+        'Contents': [
+            {'Key': 'myfolder/file-001.csv'},
+            {'Key': 'myfolder/file-002.csv'}
+        ]
+    }
+    mock_df = MagicMock()
+    mock_df.schema = "schema"
+    mock_spark_read.option.return_value.csv.return_value = mock_df
+    mock_df.union.return_value = mock_df
+    result = tdv_csv_file_read('my-bucket', 'myfolder/')
+    assert result == mock_df
+
+
+# -----------------------------
+# file_conversion test (simplified for mocking)
+# -----------------------------
+
+@patch('glue_job.get_registration_data', return_value=('col1,col2', 'col1', 's3', 'json'))
+@patch('glue_job.spark.read.json')
+@patch('glue_job.rename_file', return_value='renamed_file.json')
+def test_file_conversion_json(mock_rename, mock_read_json, mock_reg_data):
+    mock_df = MagicMock()
+    mock_df.count.return_value = 100
+    mock_df.columns = ['col1', 'col2']
+    mock_read_json.return_value = mock_df
+    result, count = file_conversion('col1,col2', ['col1'])
+    assert result == "Success"
+    assert count == 100
