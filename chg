@@ -1,0 +1,27 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    branches:
+      - main
+    inputs:
+      cr_number:
+        description: 'Enter the Change Request Number (e.g., CR-123456)'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate CR Number
+        run: |
+          if [[ ! "${{ github.event.inputs.cr_number }}" =~ ^CR-[0-9]{6}$ ]]; then
+            echo "Invalid CR number format. Expected format: CR-123456"
+            exit 1
+          fi
+          echo "CR number is valid: ${{ github.event.inputs.cr_number }}"
+      
+      - name: Deploy to Production
+        run: echo "Deploying to production from main with CR ${{ github.event.inputs.cr_number }}"
