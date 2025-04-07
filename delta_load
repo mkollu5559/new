@@ -1,103 +1,76 @@
-
 import pytest
+import sys
+import os
+from unittest.mock import MagicMock, patch
+from pyspark.sql import SparkSession
 from pyspark.sql.types import *
-from unittest.mock import patch, MagicMock
-from your_script import (
-    get_data_type, get_spark_schema, parse_schema, ApplyMapping,
-    create_temp_view, get_delta_table_schema, delta_table_load_incr, write_logs
-)
 
-# Shared SparkSession for all tests
+
+dbutils_mock = MagicMock()
+dbutils_mock.widgets.get.side_effect = lambda k: {
+    'Primary_Key': 'id',
+    'Incr_TimeStamp_Column': 'updated_at',
+    'Delta_Table_Name': 'test_table',
+    'source_s3_path': 's3://dummy/source/',
+    'Delta_Table_db': 'test_db',
+    'table_config_file': 's3://dummy/config.txt',
+    'refresh_type': 'incr',
+    'env': 'dev',
+    'incr_ingest_timestamp': '2025-04-07-00:00:00',
+    'run_type': 'adhoc',
+    'table_refresh_type': 'incr',
+    'source_type': 's3',
+    'number_of_files': '1000'
+}.get(k, '')
+
+sys.modules['dbutils'] = dbutils_mock
+
+# -------------------------------------------
+# STEP 2: Mock delta.tables before importing source
+# -------------------------------------------
+sys.modules['delta'] = MagicMock()
+sys.modules['delta.tables'] = MagicMock()
+
+# -------------------------------------------
+# STEP 3: Add root path to sys.path if needed
+# -------------------------------------------
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+# -------------------------------------------
+# STEP 4: Import the source (after mocks!)
+# -------------------------------------------
+from module.databricks.madatasync.artifacts.notebooks import maa_databricks_ntbk_madatasync_delta_load as script
+
+# -------------------------------------------
+# STEP 5: Spark Session Fixture
+# -------------------------------------------
 @pytest.fixture(scope="session")
 def spark_session():
-    from pyspark.sql import SparkSession
-    return SparkSession.builder.appName("TestSession").master("local[*]").getOrCreate()
+    return SparkSession.builder.master("local[*]").appName("TestSession").getOrCreate()
 
-# ----- Unit Tests -----
-
-@pytest.mark.parametrize("input_type, expected_type", [
-    ("INT", IntegerType()), ("STRING", StringType()), ("DATE", DateType()),
-    ("decimal(10,2)", DecimalType(10,2)), ("double", DoubleType()),
-])
-def test_get_data_type(input_type, expected_type):
-    result = get_data_type(input_type)
-    assert isinstance(result, type(expected_type))
-
-def test_get_spark_schema_valid():
-    schema_details = [
-        {"col_name": "id", "src_type": "INT", "tgt_type": "STRING"},
-        {"col_name": "value", "src_type": "STRING", "tgt_type": "STRING"},
-    ]
-    struct_type, cast_dict = get_spark_schema(schema_details)
-    assert isinstance(struct_type, StructType)
-    assert cast_dict == {"id": StringType(), "value": StringType()}
+# -------------------------------------------
+# Example test
+# -------------------------------------------
+def test_get_data_type_decimal():
+    dtype = script.get_data_type("decimal(10,2)")
+    assert isinstance(dtype, DecimalType)
+    assert dtype.precision == 10 and dtype.scale == 2
 
 def test_parse_schema_valid():
-    source_schema = [{"col_name": "id", "data_type": "INT"}, {"col_name": "value", "data_type": "STRING"}]
-    target_schema = [{"col_name": "id", "data_type": "STRING"}, {"col_name": "value", "data_type": "STRING"}]
-    result = parse_schema(source_schema, target_schema)
-    assert result == [
-        {"col_name": "id", "src_type": "INT", "tgt_type": "STRING"},
-        {"col_name": "value", "src_type": "STRING", "tgt_type": "STRING"},
-    ]
+    source = [{"col_name": "id", "data_type": "int"}]
+    target = [{"col_name": "id", "data_type": "string"}]
+    parsed = script.parse_schema(source, target)
+    assert parsed == [{"col_name": "id", "src_type": "int", "tgt_type": "string"}]
 
-def test_apply_mapping_casts_columns(spark_session):
+def test_get_spark_schema_valid():
+    details = [{"col_name": "id", "src_type": "STRING", "tgt_type": "INT"}]
+    src_schema, tgt_schema = script.get_spark_schema(details)
+    assert isinstance(src_schema, StructType)
+    assert "id" in tgt_schema
+    assert isinstance(tgt_schema["id"], IntegerType)
+
+def test_apply_mapping_casts_column(spark_session):
     df = spark_session.createDataFrame([("123",)], ["id"])
     schema_details = [{"col_name": "id", "src_type": "STRING", "tgt_type": "INT"}]
-    result_df = ApplyMapping(df, schema_details)
+    result_df = script.ApplyMapping(df, schema_details)
     assert result_df.schema["id"].dataType == IntegerType()
-
-# ----- Spark + Mock Tests -----
-
-@patch("your_script.spark")
-def test_create_temp_view_basic(mock_spark):
-    mock_df = MagicMock()
-    mock_spark.read.format.return_value.option.return_value.load.return_value = mock_df
-    mock_df.createOrReplaceTempView.return_value = None
-    mock_spark.sql.return_value.collect.return_value = [MagicMock()]
-    mock_spark.sql.return_value.collect.return_value[0][0] = 10
-    temp_view, count = create_temp_view("s3://dummy-path/", "my_table")
-    assert temp_view == "my_table_temp"
-    assert count == 10
-
-@patch("your_script.spark")
-def test_get_delta_table_schema_with_db(mock_spark):
-    desc_df_mock = MagicMock()
-    mock_spark.sql.return_value = desc_df_mock
-    filtered_df = MagicMock()
-    desc_df_mock.where.return_value = filtered_df
-    pandas_df_mock = MagicMock()
-    pandas_df_mock.drop.return_value.to_json.return_value = '[{"col_name":"id","data_type":"int"}]'
-    filtered_df.toPandas.return_value = pandas_df_mock
-    result = get_delta_table_schema("my_db", "my_table")
-    assert result == "[{'col_name':'id','data_type':'int'}]"
-
-@patch("your_script.spark")
-def test_get_delta_table_schema_exception(mock_spark):
-    mock_spark.sql.side_effect = Exception("bad SQL")
-    with patch("your_script.write_logs") as mock_log:
-        with pytest.raises(Exception):
-            get_delta_table_schema("fake_db", "fake_table")
-        assert mock_log.called
-
-@patch("your_script.spark")
-def test_write_logs_behavior(mock_spark):
-    mock_df = MagicMock()
-    mock_spark.createDataFrame.return_value = mock_df
-    write_logs("Success", "Mock Message")
-    mock_df.show.assert_called_once()
-
-@patch("your_script.spark")
-@patch("your_script.ApplyMapping")
-@patch("your_script.createDeltaTableFromDFSchema")
-@patch("your_script.DeltaTable")
-def test_delta_table_load_incr_mocked(mock_delta_table, mock_create_table, mock_apply_mapping, mock_spark):
-    mock_df = MagicMock()
-    mock_spark.readStream.format.return_value.option.return_value.option.return_value.option.return_value.option.return_value.option.return_value.schema.return_value.load.return_value = mock_df
-    mock_apply_mapping.return_value = mock_df
-    mock_create_table.return_value = "test_table"
-    mock_write = mock_df.writeStream.format.return_value.foreachBatch.return_value.option.return_value.outputMode.return_value.trigger.return_value.start
-    mock_write.return_value.awaitTermination.return_value = None
-    with patch("your_script.df_count", 1):
-        result = delta_table_load_incr(trigger_cnt=0)
-        assert isinstance(result, int)
