@@ -2,12 +2,8 @@ import sys
 from unittest.mock import MagicMock, patch
 import pytest
 
-# --- FIX #1: Mock awsglue before importing your main module ---
-sys.modules["awsglue"] = MagicMock()
-sys.modules["awsglue.utils"] = MagicMock()
-
-from awsglue.utils import getResolvedOptions
-getResolvedOptions.return_value = {
+# Fix #1: Properly mock awsglue.getResolvedOptions BEFORE importing main code
+fake_args = {
     "OSS_ENV": "dev",
     "DATABASE_NAME": "mydb_V",
     "TABLE_NAME": "mytable",
@@ -17,35 +13,40 @@ getResolvedOptions.return_value = {
     "JOB_RUN_ID": "run-12345"
 }
 
+mock_awsglue = MagicMock()
+mock_awsglue.utils.getResolvedOptions.return_value = fake_args
+sys.modules["awsglue"] = mock_awsglue
+sys.modules["awsglue.utils"] = mock_awsglue.utils
 
-# --- Fixture to patch all external AWS / Spark / JDBC dependencies ---
+# Now import the class after mocking
+from your_module import Db_Config_Create  # Replace your_module with actual filename
+
 @pytest.fixture(autouse=True)
-def patch_everything():
+def patch_dependencies():
     with patch("boto3.resource") as mock_boto3_resource, \
          patch("boto3.session.Session") as mock_boto3_session, \
          patch("teradatasql.connect") as mock_td_connect, \
          patch("pyspark.sql.SparkSession") as mock_spark_session:
 
-        # Mock S3
-        mock_s3_obj = MagicMock()
+        # Mock S3 and DynamoDB
         mock_s3 = MagicMock()
-        mock_s3.Object.return_value = mock_s3_obj
+        mock_s3.Object.return_value.put.return_value = None
+        mock_ddb_table = MagicMock()
         mock_boto3_resource.side_effect = lambda service: {
             "s3": mock_s3,
-            "dynamodb": MagicMock(Table=MagicMock(return_value=MagicMock()))
+            "dynamodb": MagicMock(Table=MagicMock(return_value=mock_ddb_table))
         }[service]
 
-        # Mock SecretsManager
+        # Mock Secrets Manager
         mock_secrets_client = MagicMock()
         mock_secrets_client.get_secret_value.return_value = {
-            'SecretString': '{"username": "tduser", "password": "tdpass"}'
+            "SecretString": '{"username": "tduser", "password": "tdpass"}'
         }
         mock_session = MagicMock()
         mock_session.client.return_value = mock_secrets_client
         mock_boto3_session.return_value = mock_session
 
         # Mock Spark
-        mock_spark = MagicMock()
         mock_df = MagicMock()
         mock_df.count.return_value = 1
         mock_df.toPandas.return_value.sort_values.return_value = MagicMock(
@@ -53,13 +54,13 @@ def patch_everything():
             to_list=lambda: ["col1 INT", "col2 STRING"],
             index=[0, 1]
         )
-        spark_reader = MagicMock()
-        spark_reader.option.return_value = spark_reader
-        spark_reader.load.return_value = mock_df
-        mock_spark.read.format.return_value = spark_reader
+        mock_reader = MagicMock()
+        mock_reader.option.return_value = mock_reader
+        mock_reader.load.return_value = mock_df
+        mock_spark = MagicMock(read=MagicMock(format=MagicMock(return_value=mock_reader)))
         mock_spark_session.builder.appName.return_value.config.return_value.config.return_value.config.return_value.config.return_value.getOrCreate.return_value = mock_spark
 
-        # Mock Teradata connect
+        # Mock Teradata
         mock_cursor = MagicMock()
         mock_conn = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
@@ -68,16 +69,10 @@ def patch_everything():
         yield
 
 
-# --- FIX #2: Patch internal methods to isolate AWS and DB calls ---
-@patch("your_module.Db_Config_Create.get_tdv_creds", return_value=("tduser", "tdpass"))
-@patch("your_module.Db_Config_Create.func_tdconnect")
-@patch("your_module.Db_Config_Create.update_audit_table")
+@patch.object(Db_Config_Create, "get_tdv_creds", return_value=("tduser", "tdpass"))
+@patch.object(Db_Config_Create, "func_tdconnect")
+@patch.object(Db_Config_Create, "update_audit_table")
 def test_write_to_s3(mock_update_audit, mock_tdconn, mock_get_creds):
-    from your_module import Db_Config_Create  # replace with actual module name!
-
     instance = Db_Config_Create()
     instance.write_to_s3()
-
-    mock_update_audit.assert_called_with(
-        "run-12345", "mydb_V", "mytable", "Success", ""
-    )
+    mock_update_audit.assert_called_with("run-12345", "mydb_V", "mytable", "Success", "")
