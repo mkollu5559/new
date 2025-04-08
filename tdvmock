@@ -2,25 +2,29 @@ import sys
 from unittest.mock import MagicMock, patch
 import pytest
 
-# Fix #1: Properly mock awsglue.getResolvedOptions BEFORE importing main code
+# === FIX #1: Inject a real dictionary for getResolvedOptions BEFORE importing our main module ===
 fake_args = {
     "OSS_ENV": "dev",
     "DATABASE_NAME": "mydb_V",
     "TABLE_NAME": "mytable",
     "SERVER": "myserver",
-    "secret_name": "my-secret",
+    "secret_name": "my-secret",  # use real string value
     "BUCKET_NAME": "my-bucket",
     "JOB_RUN_ID": "run-12345"
 }
 
-mock_awsglue = MagicMock()
-mock_awsglue.utils.getResolvedOptions.return_value = fake_args
-sys.modules["awsglue"] = mock_awsglue
-sys.modules["awsglue.utils"] = mock_awsglue.utils
+# Create fake awsglue modules so that getResolvedOptions is available.
+fake_awsglue_utils = MagicMock()
+fake_awsglue_utils.getResolvedOptions.return_value = fake_args
 
-# Now import the class after mocking
-from your_module import Db_Config_Create  # Replace your_module with actual filename
+# Set these in sys.modules BEFORE importing our main file.
+sys.modules["awsglue"] = MagicMock()
+sys.modules["awsglue.utils"] = fake_awsglue_utils
 
+# === Now import your class (replace "your_module" with your actual module name) ===
+from your_module import Db_Config_Create
+
+# === FIX #2: Patch all external dependencies with pytest fixtures ===
 @pytest.fixture(autouse=True)
 def patch_dependencies():
     with patch("boto3.resource") as mock_boto3_resource, \
@@ -28,51 +32,186 @@ def patch_dependencies():
          patch("teradatasql.connect") as mock_td_connect, \
          patch("pyspark.sql.SparkSession") as mock_spark_session:
 
-        # Mock S3 and DynamoDB
-        mock_s3 = MagicMock()
-        mock_s3.Object.return_value.put.return_value = None
-        mock_ddb_table = MagicMock()
-        mock_boto3_resource.side_effect = lambda service: {
-            "s3": mock_s3,
-            "dynamodb": MagicMock(Table=MagicMock(return_value=mock_ddb_table))
-        }[service]
+        # --- MOCK boto3.resource for S3 and DynamoDB ---
+        # Create a fake S3 object where .put() does nothing.
+        fake_s3_object = MagicMock()
+        fake_s3_object.put.return_value = None
 
-        # Mock Secrets Manager
-        mock_secrets_client = MagicMock()
-        mock_secrets_client.get_secret_value.return_value = {
+        # Create a fake S3 resource that returns our fake S3 object.
+        fake_s3_resource = MagicMock()
+        fake_s3_resource.Object.return_value = fake_s3_object
+
+        # Create a fake DynamoDB resource. Its Table method returns a MagicMock.
+        fake_ddb = MagicMock()
+        fake_ddb.Table.return_value = MagicMock()
+
+        # When boto3.resource is called for "s3" or "dynamodb", return the proper fake.
+        def resource_side_effect(service):
+            if service == "s3":
+                return fake_s3_resource
+            elif service == "dynamodb":
+                return fake_ddb
+            else:
+                raise ValueError(f"Unexpected service: {service}")
+
+        mock_boto3_resource.side_effect = resource_side_effect
+
+        # --- MOCK Secrets Manager from boto3.session.Session ---
+        fake_secrets_client = MagicMock()
+        fake_secrets_client.get_secret_value.return_value = {
             "SecretString": '{"username": "tduser", "password": "tdpass"}'
         }
-        mock_session = MagicMock()
-        mock_session.client.return_value = mock_secrets_client
-        mock_boto3_session.return_value = mock_session
+        fake_session = MagicMock()
+        fake_session.client.return_value = fake_secrets_client
+        mock_boto3_session.return_value = fake_session
 
-        # Mock Spark
-        mock_df = MagicMock()
-        mock_df.count.return_value = 1
-        mock_df.toPandas.return_value.sort_values.return_value = MagicMock(
-            __getitem__=lambda self, key: ["col1 INT", "col2 STRING"],
-            to_list=lambda: ["col1 INT", "col2 STRING"],
-            index=[0, 1]
-        )
-        mock_reader = MagicMock()
-        mock_reader.option.return_value = mock_reader
-        mock_reader.load.return_value = mock_df
-        mock_spark = MagicMock(read=MagicMock(format=MagicMock(return_value=mock_reader)))
-        mock_spark_session.builder.appName.return_value.config.return_value.config.return_value.config.return_value.config.return_value.getOrCreate.return_value = mock_spark
+        # --- MOCK Spark ---
+        # Create a fake DataFrame object with methods count() and toPandas() fully mocked.
+        fake_df = MagicMock()
+        fake_df.count.return_value = 1
+        fake_to_pandas = MagicMock()
+        # When sort_values is called, return an object with __getitem__ for indexing.
+        fake_sorted = MagicMock()
+        fake_sorted.__getitem__.return_value = ["col1 INT", "col2 STRING"]
+        fake_sorted.to_list.return_value = ["col1 INT", "col2 STRING"]
+        fake_sorted.index = [0, 1]
+        fake_to_pandas.sort_values.return_value = fake_sorted
+        fake_df.toPandas.return_value = fake_to_pandas
 
-        # Mock Teradata
-        mock_cursor = MagicMock()
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
-        mock_td_connect.return_value = mock_conn
+        # Create a fake Spark reader chain:
+        fake_reader = MagicMock()
+        fake_reader.option.return_value = fake_reader
+        fake_reader.load.return_value = fake_df
+
+        fake_spark = MagicMock()
+        fake_spark.read.format.return_value = fake_reader
+
+        # Chain the SparkSession builder to eventually return our fake Spark instance.
+        mock_spark_session.builder.appName.return_value.config.return_value.config.return_value.config.return_value.config.return_value.getOrCreate.return_value = fake_spark
+
+        # --- MOCK Teradata connection ---
+        fake_cursor = MagicMock()
+        fake_conn = MagicMock()
+        fake_conn.cursor.return_value = fake_cursor
+        mock_td_connect.return_value = fake_conn
 
         yield
 
-
+# === FIX #3: Patch class methods to ensure no real calls are made ===
 @patch.object(Db_Config_Create, "get_tdv_creds", return_value=("tduser", "tdpass"))
 @patch.object(Db_Config_Create, "func_tdconnect")
 @patch.object(Db_Config_Create, "update_audit_table")
 def test_write_to_s3(mock_update_audit, mock_tdconn, mock_get_creds):
     instance = Db_Config_Create()
     instance.write_to_s3()
+    
+    # Validate that update_audit_table was called with the "Success" status.
+    mock_update_audit.assert_called_with("run-12345", "mydb_V", "mytable", "Success", "")import sys
+from unittest.mock import MagicMock, patch
+import pytest
+
+# === FIX #1: Inject a real dictionary for getResolvedOptions BEFORE importing our main module ===
+fake_args = {
+    "OSS_ENV": "dev",
+    "DATABASE_NAME": "mydb_V",
+    "TABLE_NAME": "mytable",
+    "SERVER": "myserver",
+    "secret_name": "my-secret",  # use real string value
+    "BUCKET_NAME": "my-bucket",
+    "JOB_RUN_ID": "run-12345"
+}
+
+# Create fake awsglue modules so that getResolvedOptions is available.
+fake_awsglue_utils = MagicMock()
+fake_awsglue_utils.getResolvedOptions.return_value = fake_args
+
+# Set these in sys.modules BEFORE importing our main file.
+sys.modules["awsglue"] = MagicMock()
+sys.modules["awsglue.utils"] = fake_awsglue_utils
+
+# === Now import your class (replace "your_module" with your actual module name) ===
+from your_module import Db_Config_Create
+
+# === FIX #2: Patch all external dependencies with pytest fixtures ===
+@pytest.fixture(autouse=True)
+def patch_dependencies():
+    with patch("boto3.resource") as mock_boto3_resource, \
+         patch("boto3.session.Session") as mock_boto3_session, \
+         patch("teradatasql.connect") as mock_td_connect, \
+         patch("pyspark.sql.SparkSession") as mock_spark_session:
+
+        # --- MOCK boto3.resource for S3 and DynamoDB ---
+        # Create a fake S3 object where .put() does nothing.
+        fake_s3_object = MagicMock()
+        fake_s3_object.put.return_value = None
+
+        # Create a fake S3 resource that returns our fake S3 object.
+        fake_s3_resource = MagicMock()
+        fake_s3_resource.Object.return_value = fake_s3_object
+
+        # Create a fake DynamoDB resource. Its Table method returns a MagicMock.
+        fake_ddb = MagicMock()
+        fake_ddb.Table.return_value = MagicMock()
+
+        # When boto3.resource is called for "s3" or "dynamodb", return the proper fake.
+        def resource_side_effect(service):
+            if service == "s3":
+                return fake_s3_resource
+            elif service == "dynamodb":
+                return fake_ddb
+            else:
+                raise ValueError(f"Unexpected service: {service}")
+
+        mock_boto3_resource.side_effect = resource_side_effect
+
+        # --- MOCK Secrets Manager from boto3.session.Session ---
+        fake_secrets_client = MagicMock()
+        fake_secrets_client.get_secret_value.return_value = {
+            "SecretString": '{"username": "tduser", "password": "tdpass"}'
+        }
+        fake_session = MagicMock()
+        fake_session.client.return_value = fake_secrets_client
+        mock_boto3_session.return_value = fake_session
+
+        # --- MOCK Spark ---
+        # Create a fake DataFrame object with methods count() and toPandas() fully mocked.
+        fake_df = MagicMock()
+        fake_df.count.return_value = 1
+        fake_to_pandas = MagicMock()
+        # When sort_values is called, return an object with __getitem__ for indexing.
+        fake_sorted = MagicMock()
+        fake_sorted.__getitem__.return_value = ["col1 INT", "col2 STRING"]
+        fake_sorted.to_list.return_value = ["col1 INT", "col2 STRING"]
+        fake_sorted.index = [0, 1]
+        fake_to_pandas.sort_values.return_value = fake_sorted
+        fake_df.toPandas.return_value = fake_to_pandas
+
+        # Create a fake Spark reader chain:
+        fake_reader = MagicMock()
+        fake_reader.option.return_value = fake_reader
+        fake_reader.load.return_value = fake_df
+
+        fake_spark = MagicMock()
+        fake_spark.read.format.return_value = fake_reader
+
+        # Chain the SparkSession builder to eventually return our fake Spark instance.
+        mock_spark_session.builder.appName.return_value.config.return_value.config.return_value.config.return_value.config.return_value.getOrCreate.return_value = fake_spark
+
+        # --- MOCK Teradata connection ---
+        fake_cursor = MagicMock()
+        fake_conn = MagicMock()
+        fake_conn.cursor.return_value = fake_cursor
+        mock_td_connect.return_value = fake_conn
+
+        yield
+
+# === FIX #3: Patch class methods to ensure no real calls are made ===
+@patch.object(Db_Config_Create, "get_tdv_creds", return_value=("tduser", "tdpass"))
+@patch.object(Db_Config_Create, "func_tdconnect")
+@patch.object(Db_Config_Create, "update_audit_table")
+def test_write_to_s3(mock_update_audit, mock_tdconn, mock_get_creds):
+    instance = Db_Config_Create()
+    instance.write_to_s3()
+    
+    # Validate that update_audit_table was called with the "Success" status.
     mock_update_audit.assert_called_with("run-12345", "mydb_V", "mytable", "Success", "")
