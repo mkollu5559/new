@@ -1,0 +1,108 @@
+jobs
+
+Yes! You're already using **`workflow_dispatch` with an input called `CHG_number`** in your `chg.yaml`, and that's perfect for manual deploy workflows.
+
+Now to apply a similar **CHG validation rule** in your **Pytest workflow for `feature/*` branches**, here’s exactly what to do:
+
+---
+
+### ✅ Modify your existing `pytest.yaml` like this:
+
+You’ll:
+
+1. Allow **manual trigger only for `feature/*`** branches.
+2. Require a `CHG_number` input when triggered manually.
+3. Validate `CHG_number` format (`CHG-123456`) before running tests.
+4. Skip or fail early if the CHG is missing or incorrect.
+
+---
+
+### Updated `pytest.yaml`:
+
+```yaml
+name: Python Tests
+
+on:
+  workflow_dispatch:
+    branches:
+      - main
+      - develop
+      - maneesha
+      - 'release/**'
+      - 'feature/**'
+    inputs:
+      CHG_number:
+        description: 'Enter CHG Number (e.g., CHG-123456)'
+        required: false
+        type: string
+
+  push:
+    branches:
+      - main
+      - develop
+      - maneesha
+      - 'release/**'
+
+jobs:
+  test:
+    name: Run Pytest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fail if CHG number missing in feature branch
+        if: startsWith(github.ref_name, 'feature/') && (!github.event.inputs.CHG_number || github.event.inputs.CHG_number == '')
+        run: |
+          echo "CHG_number is required to run tests on a feature/* branch."
+          exit 1
+
+      - name: Validate CHG Format
+        if: startsWith(github.ref_name, 'feature/') && github.event.inputs.CHG_number != ''
+        run: |
+          if [[ ! "${{ github.event.inputs.CHG_number }}" =~ ^CHG-[0-9]{6}$ ]]; then
+            echo "Invalid CHG number format. Expected: CHG-123456"
+            exit 1
+          fi
+          echo "CHG number is valid: ${{ github.event.inputs.CHG_number }}"
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r .github/workflows/requirements.txt
+
+      - name: Run Tests
+        run: |
+          python -m pytest .github/workflows/test/test*.py \
+            --junitxml=report/test.xml \
+            --cov=. \
+            --cov-report=term-missing
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results
+          path: report.xml
+
+      - name: Upload Coverage Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: htmlcov/
+
+      - name: Publish Test Report in GitHub UI
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pytest Results
+          path: |
+            report.xml
+            htmlcov/
