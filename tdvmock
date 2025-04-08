@@ -65,12 +65,10 @@ sys.modules["pyspark"] = MagicMock()
 sys.modules["pyspark.sql"] = mock_spark_session
 sys.modules["pyspark.sql.SparkSession"] = mock_spark_session
 
-
 ###############################################################################
 # 2) NOW import your module (AFTER patches are in place)
 ###############################################################################
 from db_config_create import Db_Config_Create  # replace with your module name!
-
 
 ###############################################################################
 # 3) Pytest fixture (optional) if you want extra patching post-import
@@ -83,7 +81,6 @@ def more_patching():
          patch.object(Db_Config_Create, "func_tdconnect") as mock_conn, \
          patch.object(Db_Config_Create, "update_audit_table") as mock_audit:
         yield mock_creds, mock_conn, mock_audit
-
 
 ###############################################################################
 # 4) Test
