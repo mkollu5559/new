@@ -1,0 +1,91 @@
+import pytest
+from unittest.mock import patch, MagicMock
+from datetime import datetime
+
+# Patch all external resources before importing the module
+@pytest.fixture(autouse=True)
+def patch_everything():
+    with patch("your_module.getResolvedOptions") as mock_get_args, \
+         patch("your_module.boto3") as mock_boto3, \
+         patch("your_module.SparkSession") as mock_spark_session, \
+         patch("your_module.teradatasql") as mock_teradatasql:
+
+        # Mock args
+        mock_get_args.return_value = {
+            "OSS_ENV": "dev",
+            "DATABASE_NAME": "mydb_V",
+            "TABLE_NAME": "mytable",
+            "SERVER": "myserver",
+            "secret_name": "my-secret",
+            "BUCKET_NAME": "my-bucket",
+            "JOB_RUN_ID": "run-12345"
+        }
+
+        # Mock boto3 - S3 and DynamoDB
+        mock_s3 = MagicMock()
+        mock_ddb = MagicMock()
+        mock_ddb.Table.return_value = MagicMock()
+        mock_boto3.resource.side_effect = lambda service: {
+            "s3": mock_s3,
+            "dynamodb": mock_ddb
+        }[service]
+
+        # Mock SecretsManager client
+        mock_secrets_client = MagicMock()
+        mock_secrets_client.get_secret_value.return_value = {
+            'SecretString': '{"username": "tduser", "password": "tdpass"}'
+        }
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_secrets_client
+        mock_boto3.session.Session.return_value = mock_session
+
+        # Mock Spark
+        mock_spark = MagicMock()
+        mock_df = MagicMock()
+        mock_df.count.return_value = 2
+        mock_df.toPandas.return_value = MagicMock(
+            sort_values=lambda by: MagicMock(
+                __getitem__=lambda self, key: ["col1 INT", "col2 STRING"],
+                to_list=lambda: ["col1 INT", "col2 STRING"],
+                index=[0, 1],
+            )
+        )
+
+        spark_reader = MagicMock()
+        spark_reader.option.return_value = spark_reader
+        spark_reader.load.return_value = mock_df
+        mock_spark.read.format.return_value = spark_reader
+        mock_spark_session.builder.appName.return_value.config.return_value.config.return_value.config.return_value.config.return_value.getOrCreate.return_value = mock_spark
+
+        # Mock Teradata SQL
+        mock_cursor = MagicMock()
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_teradatasql.connect.return_value = mock_conn
+
+        yield
+
+
+@patch.object(
+    target="your_module.Db_Config_Create.get_tdv_creds",
+    new=MagicMock(return_value=("tduser", "tdpass"))
+)
+@patch.object(
+    target="your_module.Db_Config_Create.func_tdconnect",
+    new=MagicMock(return_value=MagicMock())
+)
+@patch.object(
+    target="your_module.Db_Config_Create.update_audit_table",
+    new=MagicMock()
+)
+def test_write_to_s3_runs_without_error():
+    from your_module import Db_Config_Create
+    instance = Db_Config_Create()
+
+    # This will hit the _V suffix logic
+    instance.write_to_s3()
+
+    # Validate audit table update
+    instance.update_audit_table.assert_called_with(
+        "run-12345", "mydb_V", "mytable", "Success", ""
+    )
