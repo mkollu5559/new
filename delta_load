@@ -1,76 +1,91 @@
 import pytest
-import sys
-import os
-from unittest.mock import MagicMock, patch
 from pyspark.sql import SparkSession
-from pyspark.sql.types import *
+from pyspark.sql.types import (
+    StringType, IntegerType, StructType, StructField, LongType, DecimalType
+)
 
+from job import (
+    get_data_type,
+    get_spark_schema,
+    ApplyMapping,
+    parse_schema
+)
 
-dbutils_mock = MagicMock()
-dbutils_mock.widgets.get.side_effect = lambda k: {
-    'Primary_Key': 'id',
-    'Incr_TimeStamp_Column': 'updated_at',
-    'Delta_Table_Name': 'test_table',
-    'source_s3_path': 's3://dummy/source/',
-    'Delta_Table_db': 'test_db',
-    'table_config_file': 's3://dummy/config.txt',
-    'refresh_type': 'incr',
-    'env': 'dev',
-    'incr_ingest_timestamp': '2025-04-07-00:00:00',
-    'run_type': 'adhoc',
-    'table_refresh_type': 'incr',
-    'source_type': 's3',
-    'number_of_files': '1000'
-}.get(k, '')
+# ---------- FIXTURES ----------
 
-sys.modules['dbutils'] = dbutils_mock
-
-# -------------------------------------------
-# STEP 2: Mock delta.tables before importing source
-# -------------------------------------------
-sys.modules['delta'] = MagicMock()
-sys.modules['delta.tables'] = MagicMock()
-
-# -------------------------------------------
-# STEP 3: Add root path to sys.path if needed
-# -------------------------------------------
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-
-# -------------------------------------------
-# STEP 4: Import the source (after mocks!)
-# -------------------------------------------
-from module.databricks.madatasync.artifacts.notebooks import maa_databricks_ntbk_madatasync_delta_load as script
-
-# -------------------------------------------
-# STEP 5: Spark Session Fixture
-# -------------------------------------------
 @pytest.fixture(scope="session")
-def spark_session():
-    return SparkSession.builder.master("local[*]").appName("TestSession").getOrCreate()
+def spark():
+    return SparkSession.builder \
+        .appName("unit-test") \
+        .master("local[1]") \
+        .getOrCreate()
 
-# -------------------------------------------
-# Example test
-# -------------------------------------------
+
+# ---------- TESTS ----------
+
+def test_get_data_type_string():
+    result = get_data_type("STRING")
+    assert isinstance(result, StringType)
+
+
+def test_get_data_type_int():
+    result = get_data_type("INT")
+    assert isinstance(result, IntegerType)
+
+
+def test_get_data_type_bigint():
+    result = get_data_type("BIGINT")
+    assert isinstance(result, LongType)
+
+
 def test_get_data_type_decimal():
-    dtype = script.get_data_type("decimal(10,2)")
-    assert isinstance(dtype, DecimalType)
-    assert dtype.precision == 10 and dtype.scale == 2
+    result = get_data_type("decimal(10,2)")
+    assert isinstance(result, DecimalType)
+    assert result.precision == 10
+    assert result.scale == 2
 
-def test_parse_schema_valid():
-    source = [{"col_name": "id", "data_type": "int"}]
-    target = [{"col_name": "id", "data_type": "string"}]
-    parsed = script.parse_schema(source, target)
-    assert parsed == [{"col_name": "id", "src_type": "int", "tgt_type": "string"}]
 
-def test_get_spark_schema_valid():
-    details = [{"col_name": "id", "src_type": "STRING", "tgt_type": "INT"}]
-    src_schema, tgt_schema = script.get_spark_schema(details)
+def test_get_spark_schema():
+    schema_details = [
+        {'col_name': 'id', 'src_type': 'int', 'tgt_type': 'bigint'},
+        {'col_name': 'name', 'src_type': 'string', 'tgt_type': 'string'}
+    ]
+
+    src_schema, tgt_schema = get_spark_schema(schema_details)
+
     assert isinstance(src_schema, StructType)
-    assert "id" in tgt_schema
-    assert isinstance(tgt_schema["id"], IntegerType)
+    assert src_schema.fields[0].name == 'id'
+    assert isinstance(tgt_schema['id'], LongType)
+    assert isinstance(tgt_schema['name'], StringType)
 
-def test_apply_mapping_casts_column(spark_session):
-    df = spark_session.createDataFrame([("123",)], ["id"])
-    schema_details = [{"col_name": "id", "src_type": "STRING", "tgt_type": "INT"}]
-    result_df = script.ApplyMapping(df, schema_details)
-    assert result_df.schema["id"].dataType == IntegerType()
+
+def test_ApplyMapping_cast_column(spark):
+    schema_details = [
+        {'col_name': 'name', 'src_type': 'STRING', 'tgt_type': 'STRING'},
+        {'col_name': 'age', 'src_type': 'STRING', 'tgt_type': 'INT'}
+    ]
+    input_data = [("Alice", "30"), ("Bob", "25")]
+    df = spark.createDataFrame(input_data, ["name", "age"])
+
+    result_df = ApplyMapping(df, schema_details)
+
+    assert result_df.schema["age"].dataType == IntegerType()
+    assert result_df.schema["name"].dataType == StringType()
+
+
+def test_parse_schema_successful_match():
+    source_schema = [
+        {'col_name': 'id', 'data_type': 'int'},
+        {'col_name': 'name', 'data_type': 'string'}
+    ]
+    target_schema = [
+        {'col_name': 'id', 'data_type': 'bigint'},
+        {'col_name': 'name', 'data_type': 'string'}
+    ]
+
+    result = parse_schema(source_schema, target_schema)
+
+    assert len(result) == 2
+    assert result[0]['col_name'] == 'id'
+    assert result[0]['src_type'] == 'int'
+    assert result[0]['tgt_type'] == 'bigint'
