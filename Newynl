@@ -1,0 +1,108 @@
+name: Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      module:
+        required: true
+        description: "Terraform Module Name"
+        type: choice
+        options:
+          - madatasync
+      terraform_action:
+        required: true
+        description: "Terraform Command"
+        default: plan
+        type: choice
+        options:
+          - plan
+          - init
+          - apply
+          - destroy
+      force_unlock_state:
+        description: "Force-unlock State File (Only if state file is accidentally locked)"
+        required: true
+        default: false
+        type: boolean
+      CHG_number:
+        description: 'Enter Change Request Number (e.g., CHG-123456)'
+        required: false
+        type: string
+
+jobs:
+  Manual_Terraform:
+    name: Manual Terraform Workflow
+    runs-on: MA-Analytics-Runner
+    container:
+      image: ghcr.io/zilvertonz/shared-github-actions:v1-base
+      credentials:
+        username: GITHUBAUTO_Zilver
+        password: ${{ secrets.ORG_REPO_READ_ACCESS }}
+    environment:
+      name: ${{ github.ref_name == 'main' && 'prod' || github.ref_name == 'release' && 'test' || 'dev' }}
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate CHG Number
+        run: |
+          BRANCH_NAME="${GITHUB_REF##*/}"
+          echo "Branch: $BRANCH_NAME"
+          if [[ "$BRANCH_NAME" == "main" ]]; then
+            if [[ -z "${{ github.event.inputs.CHG_number }}" || ! "${{ github.event.inputs.CHG_number }}" =~ ^CHG-[0-9]{6}$ ]]; then
+              echo "Invalid or missing CHG number. Expected format: CHG-123456"
+              exit 1
+            fi
+            echo "CHG number is valid: ${{ github.event.inputs.CHG_number }}"
+          elif [[ "$BRANCH_NAME" == feature* ]]; then
+            echo "Feature branch detected. CHG number is optional: ${{ github.event.inputs.CHG_number }}"
+          else
+            echo "Skipping CHG check for branch: $BRANCH_NAME"
+          fi
+
+      - name: Load Common Variables
+        uses: zilvertonz/shared-github-actions/utility/load-dot-env@v0
+        with:
+          env_name: common
+
+      - name: Load Environment Variables
+        uses: zilvertonz/shared-github-actions/utility/load-dot-env@v0
+        with:
+          env_name: ${{ github.ref_name == 'main' && 'prod' || github.ref_name == 'release' && 'test' || 'dev' }}
+
+      - name: Authenticate via OIDC Role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.TF_VAR_account_number }}:role/Enterprise/${{ github.event.repository.name }}
+          aws-region: us-east-1
+
+      - name: Get Lock ID
+        id: get_lock_id
+        run: |
+          lock_id=$(aws dynamodb scan --table-name zilverton-tf-lock-${{ env.TF_VAR_account_number }} --region us-east-1 --filter-expression "module = :m" --expression-attribute-values '{":m":{"S":"${{ inputs.module }}"}}' --query "Items[0].LockID.S" --output text)
+          echo "lock_id=$lock_id" >> $GITHUB_OUTPUT
+
+      - name: Unlock Terraform State File
+        if: inputs.force_unlock_state
+        uses: zilvertonz/shared-github-actions/deploy/terragunt@v1
+        with:
+          tg_version: ${{ env.TG_VERSION }}
+
+      - name: Terraform/Terragrunt Lint
+        uses: zilvertonz/shared-github-actions/lint/terraform-terragunt@v1
+        with:
+          module: module/databricks/${{ inputs.module }}
+          tf_version: ${{ env.TF_VERSION }}
+          tg_version: ${{ env.TG_VERSION }}
+
+      - name: Terraform/Terragrunt Action
+        uses: zilvertonz/shared-github-actions/deploy/terragunt@v1
+        with:
+          module: module/databricks/${{ inputs.module }}
+          terraform_action: ${{ inputs.terraform_action }}
+          token: ${{ secrets.ORG_REPO_READ_ACCESS }}
+          tf_version: ${{ env.TF_VERSION }}
+          tg_version: ${{ env.TG_VERSION }}
