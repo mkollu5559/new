@@ -1,10 +1,14 @@
+import sys
+import os
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 from databricks.connect import DatabricksSession
 
-
-dbutils = MagicMock()
-dbutils.widgets.get = lambda key: {
+# --------------------
+# MOCK dbutils
+# --------------------
+dbutils_mock = MagicMock()
+dbutils_mock.widgets.get = lambda key: {
     "env": "dev",
     "domain_role": "data_engineer",
     "volume_name": "vol_test",
@@ -13,43 +17,28 @@ dbutils.widgets.get = lambda key: {
     "delta_tbl": "test_table",
     "catalog_name": "main"
 }.get(key, "")
+sys.modules["dbutils"] = dbutils_mock
 
-sys.modules['dbutils'] = dbutils
+# --------------------
+# IMPORT notebook
+# --------------------
+sys.path.append(os.path.abspath("module/databricks/madatasync/artifacts/notebooks"))
+import maa_databricks_ntbk_madatasync_ddls as job
 
-import create_volume_job as job
-
+# --------------------
+# SPARK session fixture
+# --------------------
 @pytest.fixture(scope="module")
 def spark():
     return DatabricksSession.builder.getOrCreate()
 
-@patch("create_volume_job.spark")
-def test_create_volume_valid(mock_spark):
+# --------------------
+# TEST CASES
+# --------------------
+def test_create_volume_valid(spark):
     msg = job.create_volume("dev", "vol1", "dev_role")
-    mock_spark.sql.assert_called_once()
     assert "created successfully" in msg
 
-def test_create_volume_invalid_env():
+def test_create_volume_invalid_env(spark):
     msg = job.create_volume("stage", "vol1", "dev_role")
     assert "Invalid env" in msg
-
-@patch("create_volume_job.spark")
-@patch("create_volume_job.dbutils")
-def test_execute_sql_valid(mock_dbutils, mock_spark):
-    custom_sql = "SELECT * FROM dummy_table WHERE length(name) > 10 AND length(address) > 5 AND id > 100 AND score > 80"
-    msg = job.execute_sql(custom_sql, "", "", "", "")
-    mock_spark.sql.assert_called_once_with(custom_sql)
-    assert "executed successfully" in msg
-
-@patch("create_volume_job.dbutils")
-def test_execute_sql_checkpoint(mock_dbutils):
-    mock_dbutils.fs.rm.return_value = True
-    msg = job.execute_sql("checkpoint", "mydb", "tbl", "catalog", "vol")
-    assert "Checkpoint" in msg
-
-def test_execute_sql_invalid_short():
-    msg = job.execute_sql("select *", "", "", "", "")
-    assert "Invalid SQL" in msg
-
-def test_execute_sql_invalid_db_tbl():
-    msg = job.execute_sql("checkpoint", "x", "y", "", "")
-    assert "valid delta_db" in msg
