@@ -1,18 +1,8 @@
 from databricks.connect import DatabricksSession
 from pyspark.sql.functions import *
 
-spark = DatabricksSession.builder.getOrCreate()
 
-# Fetch widgets (you can override these in test)
-env = dbutils.widgets.get("env")
-domain_role = dbutils.widgets.get("domain_role")
-volume_name = dbutils.widgets.get("volume_name")
-custom_sql = dbutils.widgets.get("custom_sql")
-delta_db = dbutils.widgets.get("delta_db")
-delta_tbl = dbutils.widgets.get("delta_tbl")
-catalog_name = dbutils.widgets.get("catalog_name")
-
-def create_volume(env, volume_name, domain_role):
+def create_volume(env, volume_name, domain_role, spark):
     try:
         if env.lower() not in ['prod', 'dev', 'test']:
             return "Error!!! Invalid env value. Valid values are prod, test and dev"
@@ -24,7 +14,8 @@ def create_volume(env, volume_name, domain_role):
     except Exception as ex:
         raise Exception("Exception in create_volume:", ex)
 
-def execute_sql(custom_sql, delta_db, delta_tbl, catalog_name, volume_name):
+
+def execute_sql(custom_sql, delta_db, delta_tbl, catalog_name, volume_name, spark, dbutils):
     try:
         if custom_sql.lower() in ["checkpoint", "check"]:
             if len(delta_db) < 5 or len(delta_tbl) < 3:
@@ -40,11 +31,28 @@ def execute_sql(custom_sql, delta_db, delta_tbl, catalog_name, volume_name):
     except Exception as ex:
         raise Exception("Exception in execute_sql:", ex)
 
+
 def main():
+    from databricks.connect import DatabricksSession
+    from pyspark.sql.functions import *
+    import dbutils  # Only available at runtime in Databricks
+
+    spark = DatabricksSession.builder.getOrCreate()
+
+    # Fetch widgets
+    env = dbutils.widgets.get("env")
+    domain_role = dbutils.widgets.get("domain_role")
+    volume_name = dbutils.widgets.get("volume_name")
+    custom_sql = dbutils.widgets.get("custom_sql")
+    delta_db = dbutils.widgets.get("delta_db")
+    delta_tbl = dbutils.widgets.get("delta_tbl")
+    catalog_name = dbutils.widgets.get("catalog_name")
+
     if custom_sql == "NA":
-        return create_volume(env, volume_name, domain_role)
+        return create_volume(env, volume_name, domain_role, spark)
     else:
-        return execute_sql(custom_sql, delta_db, delta_tbl, catalog_name, volume_name)
+        return execute_sql(custom_sql, delta_db, delta_tbl, catalog_name, volume_name, spark, dbutils)
+
 
 if __name__ == "__main__":
     result = main()
