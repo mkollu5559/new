@@ -1,122 +1,41 @@
-
 import pytest
 from unittest.mock import patch, MagicMock
+from databricks.connect import DatabricksSession
 
-# Sample import if this code is in a module named volume_script.py
-# from volume_script import create_volume, execute_sql
+import create_volume_job as job
 
+@pytest.fixture(scope="module")
+def spark():
+    return DatabricksSession.builder.getOrCreate()
 
-@pytest.fixture
-def mock_spark():
-    with patch("volume_script.spark") as mock_spark:
-        mock_spark.sql.return_value = "Volume created"
-        yield mock_spark
-
-
-@pytest.fixture
-def mock_widgets():
-    with patch("volume_script.dbutils.widgets.get") as mock_get:
-        def side_effect(key):
-            return {
-                "env": "dev",
-                "domain_role": "test_role",
-                "volume_name": "testvol",
-                "custom_sql": "NA",
-                "delta_db": "testdb",
-                "delta_tbl": "testtbl",
-                "catalog_name": "testcat"
-            }[key]
-        mock_get.side_effect = side_effect
-        yield mock_get
-
-
-@pytest.fixture
-def mock_fs():
-    with patch("volume_script.dbutils.fs.rm") as mock_rm:
-        mock_rm.return_value = True
-        yield mock_rm
-
-
-def test_create_volume_valid_env(mock_spark, mock_widgets):
-    from volume_script import create_volume
-    result = create_volume()
-    assert result == "volume - madatasync created successfully"
+@patch("create_volume_job.spark")
+def test_create_volume_valid(mock_spark):
+    msg = job.create_volume("dev", "vol1", "dev_role")
     mock_spark.sql.assert_called_once()
+    assert "created successfully" in msg
 
+def test_create_volume_invalid_env():
+    msg = job.create_volume("stage", "vol1", "dev_role")
+    assert "Invalid env" in msg
 
-def test_create_volume_invalid_env(mock_widgets):
-    with patch("volume_script.dbutils.widgets.get") as mock_get:
-        def side_effect(key):
-            values = {
-                "env": "invalid",
-                "domain_role": "test_role",
-                "volume_name": "testvol",
-                "custom_sql": "NA",
-                "delta_db": "testdb",
-                "delta_tbl": "testtbl",
-                "catalog_name": "testcat"
-            }
-            return values[key]
-        mock_get.side_effect = side_effect
-        from volume_script import create_volume
-        result = create_volume()
-        assert "Invalid env" in result
+@patch("create_volume_job.spark")
+@patch("create_volume_job.dbutils")
+def test_execute_sql_valid(mock_dbutils, mock_spark):
+    custom_sql = "SELECT * FROM dummy_table WHERE length(name) > 10 AND length(address) > 5 AND id > 100 AND score > 80"
+    msg = job.execute_sql(custom_sql, "", "", "", "")
+    mock_spark.sql.assert_called_once_with(custom_sql)
+    assert "executed successfully" in msg
 
+@patch("create_volume_job.dbutils")
+def test_execute_sql_checkpoint(mock_dbutils):
+    mock_dbutils.fs.rm.return_value = True
+    msg = job.execute_sql("checkpoint", "mydb", "tbl", "catalog", "vol")
+    assert "Checkpoint" in msg
 
-def test_execute_sql_checkpoint_valid(mock_fs):
-    with patch("volume_script.dbutils.widgets.get") as mock_get:
-        def side_effect(key):
-            return {
-                "env": "dev",
-                "domain_role": "test_role",
-                "volume_name": "testvol",
-                "custom_sql": "checkpoint",
-                "delta_db": "testdb",
-                "delta_tbl": "testtbl",
-                "catalog_name": "testcat"
-            }[key]
-        mock_get.side_effect = side_effect
+def test_execute_sql_invalid_short():
+    msg = job.execute_sql("select *", "", "", "", "")
+    assert "Invalid SQL" in msg
 
-        from volume_script import execute_sql
-        result = execute_sql(9)
-        assert "Checkpoint" in result
-        mock_fs.assert_called_once()
-
-
-def test_execute_sql_invalid_sql_length():
-    with patch("volume_script.dbutils.widgets.get") as mock_get:
-        def side_effect(key):
-            return {
-                "env": "dev",
-                "domain_role": "test_role",
-                "volume_name": "testvol",
-                "custom_sql": "select * from x",  # too short
-                "delta_db": "testdb",
-                "delta_tbl": "testtbl",
-                "catalog_name": "testcat"
-            }[key]
-        mock_get.side_effect = side_effect
-
-        from volume_script import execute_sql
-        result = execute_sql(len("select * from x"))
-        assert "Invalid SQL" in result
-
-
-def test_execute_sql_valid_sql(mock_spark):
-    with patch("volume_script.dbutils.widgets.get") as mock_get:
-        def side_effect(key):
-            return {
-                "env": "dev",
-                "domain_role": "test_role",
-                "volume_name": "testvol",
-                "custom_sql": "select * from very_big_table_with_more_than_35_characters",
-                "delta_db": "testdb",
-                "delta_tbl": "testtbl",
-                "catalog_name": "testcat"
-            }[key]
-        mock_get.side_effect = side_effect
-
-        from volume_script import execute_sql
-        result = execute_sql(len("select * from very_big_table_with_more_than_35_characters"))
-        assert "executed successfully" in result
-        mock_spark.sql.assert_called_once()
+def test_execute_sql_invalid_db_tbl():
+    msg = job.execute_sql("checkpoint", "x", "y", "", "")
+    assert "valid delta_db" in msg
