@@ -1,0 +1,51 @@
+from databricks.connect import DatabricksSession
+from pyspark.sql.functions import *
+
+spark = DatabricksSession.builder.getOrCreate()
+
+# Fetch widgets (you can override these in test)
+env = dbutils.widgets.get("env")
+domain_role = dbutils.widgets.get("domain_role")
+volume_name = dbutils.widgets.get("volume_name")
+custom_sql = dbutils.widgets.get("custom_sql")
+delta_db = dbutils.widgets.get("delta_db")
+delta_tbl = dbutils.widgets.get("delta_tbl")
+catalog_name = dbutils.widgets.get("catalog_name")
+
+def create_volume(env, volume_name, domain_role):
+    try:
+        if env.lower() not in ['prod', 'dev', 'test']:
+            return "Error!!! Invalid env value. Valid values are prod, test and dev"
+
+        vol_env = env.lower()
+        spark.sql(f"""CREATE VOLUME IF NOT EXISTS gedp_{env}.volumes.{volume_name}_{vol_env}""")
+        # spark.sql(f"""GRANT `READ VOLUME` ON VOLUME gedp_{env}.volumes.{volume_name} TO `{domain_role}_{env.upper()}`""")
+        return "volume - madatasync created successfully"
+    except Exception as ex:
+        raise Exception("Exception in create_volume:", ex)
+
+def execute_sql(custom_sql, delta_db, delta_tbl, catalog_name, volume_name):
+    try:
+        if custom_sql.lower() in ["checkpoint", "check"]:
+            if len(delta_db) < 5 or len(delta_tbl) < 3:
+                return "Error!!! Enter a valid delta_db and delta_tbl"
+            chkptpath = f"/Volumes/{catalog_name}/volumes/{volume_name}/{delta_db}/{delta_tbl}"
+            dbutils.fs.rm(chkptpath, True)
+            return f"Checkpoint {chkptpath} is deleted."
+        elif len(custom_sql) > 35:
+            spark.sql(custom_sql)
+            return f"SQL '{custom_sql}' executed successfully."
+        else:
+            return f"Error!!! Invalid SQL - {custom_sql}"
+    except Exception as ex:
+        raise Exception("Exception in execute_sql:", ex)
+
+def main():
+    if custom_sql == "NA":
+        return create_volume(env, volume_name, domain_role)
+    else:
+        return execute_sql(custom_sql, delta_db, delta_tbl, catalog_name, volume_name)
+
+if __name__ == "__main__":
+    result = main()
+    print(result)
