@@ -4,7 +4,16 @@ from databricks.connect import DatabricksSession
 
 
 dbutils = MagicMock()
-dbutils.widgets.get = MagicMock(return_value='dummy_value')
+dbutils.widgets.get = lambda key: {
+    "env": "dev",
+    "domain_role": "data_engineer",
+    "volume_name": "vol_test",
+    "custom_sql": "",
+    "delta_db": "test_db",
+    "delta_tbl": "test_table",
+    "catalog_name": "main"
+}.get(key, "")
+
 sys.modules['dbutils'] = dbutils
 
 import create_volume_job as job
