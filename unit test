@@ -1,0 +1,37 @@
+name: Databricks CI
+
+on: [push, pull_request]
+
+jobs:
+  run-databricks-ci:
+    runs-on: MA-Analytics-Runner
+    environment: dev
+
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      DATABRICKS_CLUSTER_ID: ${{ vars.DATABRICKS_CLUSTER_ID }}
+      DATABRICKS_ORG_ID: ${{ vars.DATABRICKS_WORKSPACE_ORG_ID }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python and Virtualenv
+        run: |
+          python -V
+          pip install virtualenv
+          virtualenv venv
+          source venv/bin/activate
+          pip install -r .github/workflows/requirements.txt
+
+      - name: Run Pytest with Databricks Connect
+        run: |
+          pytest .github/workflows/test/ --junitxml=unit-testresults.xml
+
+      - name: Publish Unit Test Results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: unit-testresults
+          path: unit-testresults.xml
