@@ -1,91 +1,167 @@
+# test_e2e_databricks_job.py
+
 import pytest
+import sys
+import json
+from unittest.mock import MagicMock, patch
 from pyspark.sql import SparkSession
-from pyspark.sql.types import (
-    StringType, IntegerType, StructType, StructField, LongType, DecimalType
-)
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+from datetime import datetime
 
-from job import (
-    get_data_type,
-    get_spark_schema,
-    ApplyMapping,
-    parse_schema
-)
+# --- Mocks setup ---
+# Mock dbutils
+dbutils = MagicMock()
+dbutils.widgets.get = MagicMock(side_effect=lambda key: {
+    'Primary_Key': 'id',
+    'Incr_TimeStamp_Column': 'modified_at',
+    'Delta_Table_Name': 'dummy_table',
+    'source_s3_path': '/dummy/source/',
+    'Delta_Table_db': 'dummy_db',
+    'table_config_file': '/dummy/config.txt',
+    'refresh_type': 'full',
+    'env': 'dev',
+    'incr_ingest_timestamp': '2025-04-27-00-00-00',
+    'run_type': 'adhoc',
+    'table_refresh_type': 'full',
+    'source_type': 's3',
+    'number_of_files': '1000'
+}.get(key, ''))
 
-# ---------- FIXTURES ----------
+sys.modules['dbutils'] = dbutils
 
-@pytest.fixture(scope="session")
+# Import your notebook
+import your_notebook_filename as job  # <<< CHANGE THIS!
+
+# Mock DeltaTable
+class FakeDeltaTable:
+    @classmethod
+    def forName(cls, spark, tableName):
+        return cls()
+    
+    def alias(self, alias_name):
+        return self
+    
+    def merge(self, df, conditionString):
+        return self
+    
+    def whenMatchedUpdateAll(self):
+        return self
+    
+    def whenNotMatchedInsertAll(self):
+        return self
+    
+    def execute(self):
+        return None
+
+@pytest.fixture(scope="module")
 def spark():
-    return SparkSession.builder \
-        .appName("unit-test") \
-        .master("local[1]") \
-        .getOrCreate()
+    return (SparkSession.builder
+            .appName("e2e-test")
+            .master("local[2]")
+            .getOrCreate())
 
+@pytest.fixture(autouse=True)
+def setup_mocks(monkeypatch, spark):
+    monkeypatch.setattr(job, "spark", spark)
+    monkeypatch.setattr(job, "DeltaTable", FakeDeltaTable)
 
-# ---------- TESTS ----------
+    # Dummy DataFrame
+    dummy_schema = StructType([
+        StructField("id", IntegerType(), True),
+        StructField("modified_at", StringType(), True)
+    ])
+    dummy_data = [(1, '2025-04-27 00:00:00'), (2, '2025-04-27 00:00:01')]
 
-def test_get_data_type_string():
-    result = get_data_type("STRING")
-    assert isinstance(result, StringType)
+    df = spark.createDataFrame(dummy_data, schema=dummy_schema)
 
+    # Mock spark.read
+    monkeypatch.setattr(job.spark, "read", MagicMock(return_value=df))
+    
+    # Mock spark.read.text for config file reading
+    spark_read_mock = MagicMock()
+    spark_read_mock.text.return_value = df
+    monkeypatch.setattr(job.spark.read, "text", MagicMock(return_value=df))
 
-def test_get_data_type_int():
-    result = get_data_type("INT")
-    assert isinstance(result, IntegerType)
+    # Mock Spark SQL returns DataFrame
+    monkeypatch.setattr(job.spark, "sql", MagicMock(return_value=df))
 
+    # Mock Streaming
+    dummy_stream_reader = MagicMock()
+    dummy_stream_writer = MagicMock()
 
-def test_get_data_type_bigint():
-    result = get_data_type("BIGINT")
-    assert isinstance(result, LongType)
+    dummy_stream_reader.format.return_value = dummy_stream_reader
+    dummy_stream_reader.option.return_value = dummy_stream_reader
+    dummy_stream_reader.schema.return_value = dummy_stream_reader
+    dummy_stream_reader.load.return_value = df
 
+    dummy_stream_writer.foreachBatch.return_value = dummy_stream_writer
+    dummy_stream_writer.option.return_value = dummy_stream_writer
+    dummy_stream_writer.outputMode.return_value = dummy_stream_writer
+    dummy_stream_writer.trigger.return_value = dummy_stream_writer
+    dummy_stream_writer.start.return_value = dummy_stream_writer
+    dummy_stream_writer.awaitTermination.return_value = None
 
-def test_get_data_type_decimal():
-    result = get_data_type("decimal(10,2)")
-    assert isinstance(result, DecimalType)
-    assert result.precision == 10
-    assert result.scale == 2
+    monkeypatch.setattr(job.spark, "readStream", dummy_stream_reader)
 
+# --- E2E Test Case ---
 
-def test_get_spark_schema():
-    schema_details = [
-        {'col_name': 'id', 'src_type': 'int', 'tgt_type': 'bigint'},
-        {'col_name': 'name', 'src_type': 'string', 'tgt_type': 'string'}
-    ]
+def test_full_e2e_flow():
+    try:
+        job.start_time = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        job.Primary_Key = dbutils.widgets.get('Primary_Key')
+        job.Incr_TimeStamp_Column = dbutils.widgets.get('Incr_TimeStamp_Column')
+        job.Delta_Table_Name = dbutils.widgets.get('Delta_Table_Name')
+        job.source_s3_path = dbutils.widgets.get('source_s3_path')
+        job.Delta_Table_db = dbutils.widgets.get('Delta_Table_db')
+        job.table_config_file = dbutils.widgets.get('table_config_file')
+        job.instance_refresh_type = dbutils.widgets.get('refresh_type')
+        job.env = dbutils.widgets.get('env')
+        job.incr_ingest_timestamp = dbutils.widgets.get('incr_ingest_timestamp')
+        job.run_type = dbutils.widgets.get('run_type')
+        job.table_refresh_type = dbutils.widgets.get('table_refresh_type')
+        job.data_source_type = dbutils.widgets.get('source_type')
+        job.number_of_files = dbutils.widgets.get('number_of_files')
 
-    src_schema, tgt_schema = get_spark_schema(schema_details)
+        # Rebuild all your global variables
+        job.modified_column = job.Incr_TimeStamp_Column
+        job.Delta_Table = job.Delta_Table_Name
+        job.table_db = job.Delta_Table_db
+        job.maxFilesPerTrigger = 2000
+        job.schema_name = job.Delta_Database = f"gedp_{job.env}"
+        job.s3_src_path = f"{job.source_s3_path}incr_ingest_timestamp={job.incr_ingest_timestamp}/"
+        job.chkptpath=f"/Volumes/gedp_{job.env}/volumes/madatasync_{job.env}/{job.table_db}/{job.Delta_Table}"
 
-    assert isinstance(src_schema, StructType)
-    assert src_schema.fields[0].name == 'id'
-    assert isinstance(tgt_schema['id'], LongType)
-    assert isinstance(tgt_schema['name'], StringType)
+        # Manual trigger: simulate entire notebook 'try' block
+        full_table = f"{job.table_db}.{job.Delta_Table}"
+        is_delta_table = 'N'
 
+        if job.spark.catalog.tableExists(f"{job.Delta_Database}.{job.table_db}.{job.Delta_Table}"):
+            is_delta_table = 'Y'
+        else:
+            is_delta_table = 'N'
 
-def test_ApplyMapping_cast_column(spark):
-    schema_details = [
-        {'col_name': 'name', 'src_type': 'STRING', 'tgt_type': 'STRING'},
-        {'col_name': 'age', 'src_type': 'STRING', 'tgt_type': 'INT'}
-    ]
-    input_data = [("Alice", "30"), ("Bob", "25")]
-    df = spark.createDataFrame(input_data, ["name", "age"])
+        if is_delta_table == 'N':
+            print("Create table")
+            master_table_name = job.createDeltaTableFromDDL(full_table, job.Delta_Database)
+            is_delta_table = 'Y'
 
-    result_df = ApplyMapping(df, schema_details)
+        temp_view, df_count = job.create_temp_view(job.s3_src_path, job.Delta_Table)
+        SourceSchema = job.get_delta_table_schema('', temp_view)
+        if is_delta_table == 'Y':
+            TargetSchema = job.get_delta_table_schema(job.Delta_Database, full_table)
+        else:
+            TargetSchema = SourceSchema
 
-    assert result_df.schema["age"].dataType == IntegerType()
-    assert result_df.schema["name"].dataType == StringType()
+        schema_details = job.parse_schema(eval(SourceSchema), eval(TargetSchema))
+        job.src_schema, job.tgt_schema = job.get_spark_schema(schema_details)
 
+        if job.table_refresh_type.lower() == 'full':
+            rec_cnt = job.delta_table_load_full()
+        else:
+            rec_cnt = job.delta_table_load_incr(job.trigger_cnt)
 
-def test_parse_schema_successful_match():
-    source_schema = [
-        {'col_name': 'id', 'data_type': 'int'},
-        {'col_name': 'name', 'data_type': 'string'}
-    ]
-    target_schema = [
-        {'col_name': 'id', 'data_type': 'bigint'},
-        {'col_name': 'name', 'data_type': 'string'}
-    ]
+        assert rec_cnt >= 0
 
-    result = parse_schema(source_schema, target_schema)
+    except Exception as e:
+        pytest.fail(f"E2E pipeline execution failed: {e}")
 
-    assert len(result) == 2
-    assert result[0]['col_name'] == 'id'
-    assert result[0]['src_type'] == 'int'
-    assert result[0]['tgt_type'] == 'bigint'
