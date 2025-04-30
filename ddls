@@ -1,44 +1,49 @@
-import sys
-import os
 import pytest
 from unittest.mock import MagicMock
 from databricks.connect import DatabricksSession
+import maa_databricks_ntbk_madatasync_ddls as job  # replace with your actual file/module name
 
-# --------------------
-# MOCK dbutils
-# --------------------
-dbutils_mock = MagicMock()
-dbutils_mock.widgets.get = lambda key: {
-    "env": "dev",
-    "domain_role": "data_engineer",
-    "volume_name": "vol_test",
-    "custom_sql": "",
-    "delta_db": "test_db",
-    "delta_tbl": "test_table",
-    "catalog_name": "main"
-}.get(key, "")
-sys.modules["dbutils"] = dbutils_mock
-
-# --------------------
-# IMPORT notebook
-# --------------------
-sys.path.append(os.path.abspath("module/databricks/madatasync/artifacts/notebooks"))
-import maa_databricks_ntbk_madatasync_ddls as job
-
-# --------------------
-# SPARK session fixture
-# --------------------
+# ------------------------------------------
+# Fixture for real Spark session via Connect
+# ------------------------------------------
 @pytest.fixture(scope="module")
 def spark():
     return DatabricksSession.builder.getOrCreate()
 
-# --------------------
-# TEST CASES
-# --------------------
+# ------------------------------------------
+# Test create_volume()
+# ------------------------------------------
 def test_create_volume_valid(spark):
-    msg = job.create_volume("dev", "vol1", "dev_role")
+    msg = job.create_volume("dev", "vol_test", "data_engineer", spark)
     assert "created successfully" in msg
 
 def test_create_volume_invalid_env(spark):
-    msg = job.create_volume("stage", "vol1", "dev_role")
+    msg = job.create_volume("invalid", "vol_test", "data_engineer", spark)
     assert "Invalid env" in msg
+
+# ------------------------------------------
+# Test execute_sql()
+# ------------------------------------------
+def test_execute_sql_valid_checkpoint(spark):
+    dbutils = MagicMock()
+    dbutils.fs.rm = MagicMock()
+
+    msg = job.execute_sql("checkpoint", "test_db", "test_tbl", "main", "vol_test", spark, dbutils)
+    assert "Checkpoint /Volumes/main/volumes/vol_test/test_db/test_tbl is deleted." in msg
+    dbutils.fs.rm.assert_called_once()
+
+def test_execute_sql_invalid_checkpoint(spark):
+    dbutils = MagicMock()
+    msg = job.execute_sql("checkpoint", "", "t", "main", "vol_test", spark, dbutils)
+    assert "Error!!! Enter a valid delta_db and delta_tbl" in msg
+
+def test_execute_sql_valid_custom_sql(spark):
+    custom_sql = "SELECT 1 AS test_col FROM VALUES(1) as temp(value)"
+    dbutils = MagicMock()
+    msg = job.execute_sql(custom_sql, "test_db", "test_tbl", "main", "vol_test", spark, dbutils)
+    assert "executed successfully" in msg
+
+def test_execute_sql_invalid_custom_sql(spark):
+    dbutils = MagicMock()
+    msg = job.execute_sql("short sql", "test_db", "test_tbl", "main", "vol_test", spark, dbutils)
+    assert "Error!!! Invalid SQL" in msg
