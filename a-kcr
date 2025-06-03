@@ -1,0 +1,176 @@
+# =======================
+# TEMP KEYVAULT IP WHITELIST LOGIC
+# =======================
+function Add-TemporaryWhitelistIP {
+    param (
+        [string]$vaultName,
+        [string]$agentIP
+    )
+    $whitelistedIP = "$agentIP/32"
+    $keyVault = Get-AzKeyVault -VaultName $vaultName
+    $existingIPs = $keyVault.NetworkAcls.IpAddressRanges
+
+    if (-not ($existingIPs -contains $whitelistedIP)) {
+        $updatedIPs = $existingIPs + $whitelistedIP
+        Update-AzKeyVaultNetworkRuleSet -VaultName $vaultName `
+            -IpAddressRange $updatedIPs `
+            -DefaultAction $keyVault.NetworkAcls.DefaultAction `
+            -Bypass $keyVault.NetworkAcls.Bypass | Out-Null
+        Write-Host "Whitelisted $whitelistedIP to Key Vault $vaultName"
+    }
+}
+
+function Remove-TemporaryWhitelistIP {
+    param (
+        [string]$vaultName,
+        [string]$agentIP
+    )
+    $whitelistedIP = "$agentIP/32"
+    $keyVault = Get-AzKeyVault -VaultName $vaultName
+    $existingIPs = $keyVault.NetworkAcls.IpAddressRanges
+
+    if ($existingIPs -contains $whitelistedIP) {
+        $remainingIPs = $existingIPs | Where-Object { $_ -ne $whitelistedIP }
+        Update-AzKeyVaultNetworkRuleSet -VaultName $vaultName `
+            -IpAddressRange $remainingIPs `
+            -DefaultAction $keyVault.NetworkAcls.DefaultAction `
+            -Bypass $keyVault.NetworkAcls.Bypass | Out-Null
+        Write-Host "Removed $whitelistedIP from Key Vault $vaultName"
+    }
+}
+
+# =======================
+# REALM PROVISIONING LOGIC
+# =======================
+function Convert-Token {
+    [CmdletBinding()]
+    param (
+        [string]$jsonTemplate,
+        [string]$token,
+        [string]$value
+    )
+    return ($jsonTemplate -replace "{{$token}}", $value)
+}
+
+function Get-AllKeycloakTenants {
+    [CmdletBinding()]
+    param (
+        [PSCustomObject]$commonConfig
+    )
+    $accessToken = Get-AccessToken -keyvaultName $commonConfig.keycloak.keyvaultName -keycloakBaseURL $commonConfig.keycloak.keycloakBaseURL
+    $headers = @{ Authorization = "Bearer $accessToken"; "Content-Type" = "application/json" }
+    $response = Invoke-RestMethod -Uri "$($commonConfig.keycloak.keycloakBaseURL)/admin/realms" -Method 'GET' -Headers $headers
+    return $response
+}
+
+function Set-Realm {
+    [CmdletBinding()]
+    param (
+        [string]$keyvaultName,
+        [string]$keycloakBaseURL,
+        [string]$realmName,
+        [string]$realmConfig,
+        [string]$method
+    )
+
+    $accessToken = Get-AccessToken -keyvaultName $keyvaultName -keycloakBaseURL $keycloakBaseURL
+    $headers = @{ Authorization = "Bearer $accessToken"; "Content-Type" = "application/json" }
+
+    $realmSetupUrl = $realmName
+    $aadIdentityProvider = ''
+    if ($method -eq "PUT") {
+        $realmSetupUrl = $realmName
+        $realmConfigAsObject = $realmConfig | ConvertFrom-Json
+        $aadIdentityProvider = $realmConfigAsObject.identityProviders[0] | ConvertTo-Json
+    }
+
+    try {
+        Write-Host "Setting Keycloak $realmName environment"
+        Invoke-RestMethod "$keycloakBaseURL/admin/realms/$realmSetupUrl" -Method $method -Headers $headers -Body $realmConfig
+        if ($aadIdentityProvider -ne '') {
+            Invoke-RestMethod "$keycloakBaseURL/admin/realms/$realmName/identity-provider/instances/aad" -Method Put -Headers $headers -Body $aadIdentityProvider
+        }
+        Write-Host "Keycloak setup has completed for $realmName environment"
+    } catch {
+        Write-Host "Failed to setup realm $realmName. Status code: $($_.Exception.Response.StatusCode.value__)"
+    }
+}
+
+function Get-RealmConfig {
+    [CmdletBinding()]
+    param (
+        [PSCustomObject]$commonConfig,
+        [PSCustomObject]$tenantConfig
+    )
+
+    $realmTemplate = Get-Content -Raw "$PWD/environments/common/realm-template.json"
+    $realmTemplate = Convert-Token -jsonTemplate $realmTemplate -token "tenant_name" -value $tenantConfig.name
+    $realmTemplate = Convert-Token -jsonTemplate $realmTemplate -token "aad_tenant_id" -value $tenantConfig.keycloak.aad_tenant_id
+    $realmTemplate = Convert-Token -jsonTemplate $realmTemplate -token "aad_client_id" -value $tenantConfig.keycloak.aad_client_id
+    $realmTemplate = Convert-Token -jsonTemplate $realmTemplate -token "aad_client_secret" -value $tenantConfig.keycloak.aad_client_secret
+    $realmTemplate = Convert-Token -jsonTemplate $realmTemplate -token "aad_doctor_group_id" -value $tenantConfig.keycloak.aad_doctor_group_id
+    $realmTemplate = Convert-Token -jsonTemplate $realmTemplate -token "aad_nurse_group_id" -value $tenantConfig.keycloak.aad_nurse_group_id
+    $realmTemplate = Convert-Token -jsonTemplate $realmTemplate -token "domain" -value $commonConfig.domain
+
+    return $realmTemplate
+}
+
+function Set-RealmConfig {
+    [CmdletBinding()]
+    param (
+        [PSCustomObject]$commonConfig,
+        [PSCustomObject]$tenantConfig,
+        [string]$method
+    )
+
+    $realmConfig = Get-RealmConfig -commonConfig $commonConfig -tenantConfig $tenantConfig
+    Set-Realm -keyvaultName $commonConfig.keycloak.keyvaultName -keycloakBaseURL $commonConfig.keycloak.keycloakBaseURL `
+        -realmName $tenantConfig.name -realmConfig $realmConfig -method $method
+}
+
+function Read-Config {
+    [CmdletBinding()]
+    $commonConfig = Get-Content -Raw "$PWD/terraform/common.json" | ConvertFrom-Json
+    $tenantsConfig = Get-Content -Raw "$PWD/terraform/tenants.json" | ConvertFrom-Json
+
+    [PSCustomObject]@{
+        commonConfig  = $commonConfig
+        tenantsConfig = $tenantsConfig
+    }
+}
+
+function Add-KeycloakRealm {
+    [CmdletBinding()]
+    param (
+        [string]$targetTenant=$null
+    )
+
+    Write-Host "Provisioning realms in Keycloak"
+    $config = Read-Config
+    $vaultName = $config.commonConfig.keycloak.keyvaultName
+    $agentIP = (Invoke-RestMethod -Uri 'https://api.ipify.org?format=json').ip
+
+    try {
+        Add-TemporaryWhitelistIP -vaultName $vaultName -agentIP $agentIP
+
+        $existingKeycloakTenants = Get-AllKeycloakTenants -commonConfig $config.commonConfig
+
+        $config.tenantsConfig | ForEach-Object {
+            $tenantConfig = $_
+            if (($null -eq $targetTenant) -or ($targetTenant -eq $tenantConfig.name)) {
+                if ($tenantConfig.keycloak) {
+                    if ($null -eq ($existingKeycloakTenants | Where-Object { $_.realm -eq $tenantConfig.name })) {
+                        Set-RealmConfig -commonConfig $config.commonConfig -tenantConfig $tenantConfig -method "POST"
+                    } else {
+                        Set-RealmConfig -commonConfig $config.commonConfig -tenantConfig $tenantConfig -method "PUT"
+                    }
+                }
+            }
+        }
+
+    } finally {
+        Remove-TemporaryWhitelistIP -vaultName $vaultName -agentIP $agentIP
+    }
+}
+
+Export-ModuleMember -Function 'Add-KeycloakRealm'
