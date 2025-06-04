@@ -1,0 +1,48 @@
+function Get-AccessToken {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$keycloakBaseURL,
+        [Parameter(Mandatory=$true)][string]$keyVaultName,
+        [string]$clientId = "admin-cli",
+        [string]$username = "admin",
+        [string]$realm = "master"
+    )
+
+    $ipRange = Enable-KeyVaultFirewallForAgent -vaultName $keyVaultName
+
+    try {
+        $keycloakPassword = az keyvault secret show `
+            --vault-name $keyVaultName `
+            --name "keycloak-admin-password" `
+            --query value -o tsv 2>&1
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Azure CLI command failed (exit code: $LASTEXITCODE). Output: $keycloakPassword"
+        }
+
+        $headers = @{
+            "Content-Type" = "application/x-www-form-urlencoded"
+        }
+
+        $body = @{
+            grant_type = "password"
+            client_id  = $clientId
+            username   = $username
+            password   = $keycloakPassword
+        }
+
+        $response = Invoke-RestMethod -Uri "$keycloakBaseURL/realms/$realm/protocol/openid-connect/token" `
+            -Method POST -Headers $headers -Body $body
+
+        return $response.access_token
+    }
+    catch {
+        Write-Error "Failed to get access token from Keycloak."
+        Write-Error "Exception: $($_.Exception.Message)"
+    }
+    finally {
+        Disable-KeyVaultFirewallForAgent -vaultName $keyVaultName -range $ipRange
+        $keycloakPassword = $null
+        [System.GC]::Collect()
+    }
+}
