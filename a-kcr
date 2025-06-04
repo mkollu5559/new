@@ -16,19 +16,7 @@ function Get-AccessToken {
         [string]$keycloakBaseURL
     )
 
-    # Whitelist agent IP
-    $agentip = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json").ip
-    $range = "$agentip/32"
-    $vault = Get-AzKeyVault -VaultName $keyvaultName
-    $existing = $vault.NetworkAcls.IpAddressRanges
-
-    if (-not ($existing -contains $range)) {
-        $updated = $existing + $range
-        Update-AzKeyVaultNetworkRuleSet -VaultName $keyvaultName `
-            -IpAddressRange $updated `
-            -DefaultAction $vault.NetworkAcls.DefaultAction `
-            -Bypass $vault.NetworkAcls.Bypass | Out-Null
-    }
+    $range = Enable-KeyVaultFirewallForAgent -vaultName $keyvaultName
 
     try {
         # Example: fetch token/secret
@@ -36,15 +24,7 @@ function Get-AccessToken {
         return $secret.SecretValueText
     }
     finally {
-        $vault = Get-AzKeyVault -VaultName $keyvaultName
-        $existing = $vault.NetworkAcls.IpAddressRanges
-        if ($existing -contains $range) {
-            $clean = $existing | Where-Object { $_ -ne $range }
-            Update-AzKeyVaultNetworkRuleSet -VaultName $keyvaultName `
-                -IpAddressRange $clean `
-                -DefaultAction $vault.NetworkAcls.DefaultAction `
-                -Bypass $vault.NetworkAcls.Bypass | Out-Null
-        }
+        Disable-KeyVaultFirewallForAgent -vaultName $keyvaultName -range $range
     }
 }
 
