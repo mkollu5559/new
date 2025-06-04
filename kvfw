@@ -1,0 +1,36 @@
+function Enable-KeyVaultFirewallForAgent {
+    param([string]$vaultName)
+
+    $agentIp = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json").ip
+    $range = "$agentIp/32"
+    $vault = Get-AzKeyVault -VaultName $vaultName
+    $existing = $vault.NetworkAcls.IpAddressRanges
+
+    if (-not ($existing -contains $range)) {
+        $updated = $existing + $range
+        Update-AzKeyVaultNetworkRuleSet -VaultName $vaultName `
+            -IpAddressRange $updated `
+            -DefaultAction $vault.NetworkAcls.DefaultAction `
+            -Bypass $vault.NetworkAcls.Bypass | Out-Null
+    }
+
+    return $range
+}
+
+function Disable-KeyVaultFirewallForAgent {
+    param(
+        [string]$vaultName,
+        [string]$range
+    )
+
+    $vault = Get-AzKeyVault -VaultName $vaultName
+    $existing = $vault.NetworkAcls.IpAddressRanges
+
+    if ($existing -contains $range) {
+        $cleaned = $existing | Where-Object { $_ -ne $range }
+        Update-AzKeyVaultNetworkRuleSet -VaultName $vaultName `
+            -IpAddressRange $cleaned `
+            -DefaultAction $vault.NetworkAcls.DefaultAction `
+            -Bypass $vault.NetworkAcls.Bypass | Out-Null
+    }
+}
