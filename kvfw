@@ -34,3 +34,5 @@ function Disable-KeyVaultFirewallForAgent {
             -Bypass $vault.NetworkAcls.Bypass | Out-Null
     }
 }
+
+Export-ModuleMember -Function Enable-KeyVaultFirewallForAgent, Disable-KeyVaultFirewallForAgent
