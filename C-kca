@@ -1,3 +1,5 @@
+Import-Module "$PSScriptRoot\..\CommonUtils\KeyVaultAccess.psm1"
+
 function Get-AccessToken {
     [CmdletBinding()]
     param(
@@ -32,7 +34,9 @@ function Get-AccessToken {
         }
 
         $response = Invoke-RestMethod -Uri "$keycloakBaseURL/realms/$realm/protocol/openid-connect/token" `
-            -Method POST -Headers $headers -Body $body
+            -Method POST `
+            -Headers $headers `
+            -Body $body
 
         return $response.access_token
     }
@@ -42,7 +46,12 @@ function Get-AccessToken {
     }
     finally {
         Disable-KeyVaultFirewallForAgent -vaultName $keyVaultName -range $ipRange
-        $keycloakPassword = $null
-        [System.GC]::Collect()
+
+        if ($null -ne $keycloakPassword) {
+            $keycloakPassword = $null
+            [System.GC]::Collect()
+        }
     }
 }
+
+Export-ModuleMember -Function Get-AccessToken
